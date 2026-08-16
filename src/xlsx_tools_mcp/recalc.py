@@ -77,7 +77,7 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
             ),
         )
 
-    with tempfile.TemporaryDirectory(prefix="xlsx_mcp_recalc_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix="xlsx_tools_mcp_recalc_") as tmpdir:
         src = Path(path)
         tmp_input = Path(tmpdir) / src.name
         shutil.copy(src, tmp_input)

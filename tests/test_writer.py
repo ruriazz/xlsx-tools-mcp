@@ -1,8 +1,8 @@
 import openpyxl
 import pytest
 
-from xlsx_mcp.errors import SheetNotFoundError
-from xlsx_mcp.io import reader, writer
+from xlsx_tools_mcp.errors import SheetNotFoundError
+from xlsx_tools_mcp.io import reader, writer
 
 
 @pytest.fixture

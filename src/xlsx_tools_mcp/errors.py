@@ -1,5 +1,5 @@
 class XlsxMcpError(Exception):
-    """Base exception for all xlsx-mcp domain errors."""
+    """Base exception for all xlsx-tools-mcp domain errors."""
 
 
 class SheetNotFoundError(XlsxMcpError):

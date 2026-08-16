@@ -1,8 +1,8 @@
 import pytest
 from filelock import FileLock
 
-from xlsx_mcp.errors import LockTimeoutError
-from xlsx_mcp.locking import file_lock
+from xlsx_tools_mcp.errors import LockTimeoutError
+from xlsx_tools_mcp.locking import file_lock
 
 
 def test_file_lock_times_out_when_already_held(tmp_path):

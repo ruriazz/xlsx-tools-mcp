@@ -1,7 +1,7 @@
 import openpyxl
 import pytest
 
-from xlsx_mcp.io import transform
+from xlsx_tools_mcp.io import transform
 
 
 @pytest.fixture

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import openpyxl
 import pytest
 
-from xlsx_mcp import recalc
+from xlsx_tools_mcp import recalc
 
 
 def _make_fixture(path: str):

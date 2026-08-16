@@ -34,7 +34,7 @@ _files_note = (
 )
 
 mcp = MCPServer(
-    "xlsx-mcp",
+    "xlsx-tools-mcp",
     instructions=(
         "Tools for reading and writing Excel (.xlsx) workbooks with high accuracy. "
         "Writes are saved with openpyxl (preserving the file's existing structure, "
