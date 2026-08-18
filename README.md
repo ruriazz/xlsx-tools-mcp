@@ -2,7 +2,7 @@
 
 An MCP server for reading and writing Excel (.xlsx) files with high accuracy, while preserving the file's existing structure, styles, and formulas.
 
-[![CI](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml) ![PyPI Version](https://img.shields.io/pypi/v/xlsx-tools-mcp)
+[![CI](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml) ![PyPI Version](https://img.shields.io/pypi/v/xlsx-tools-mcp) [![Downloads/month](https://img.shields.io/pypi/dm/xlsx-tools-mcp)](https://pypistats.org/packages/xlsx-tools-mcp)
 
 ---
 
@@ -21,6 +21,14 @@ It is built around the principle that editing an existing workbook should **not*
 - **Per-file locking** — concurrent tool calls (or other processes) touching the same workbook are serialized via a sibling `<path>.lock` file (filelock), so writes never interleave and corrupt the file.
 - **XML-bomb protection** — the `defusedxml` package is an automatic dependency; openpyxl detects it and uses its hardened XML parser, so hostile `xlsx` XML can't expand into resource exhaustion.
 - **Preload files at startup** — set `XLSX_MCP_FILES` to preload one or more workbooks; tools can then be called with `path` omitted or with a short alias instead of a full filesystem path.
+
+---
+
+## Download Stats
+
+[![Downloads/month](https://img.shields.io/pypi/dm/xlsx-tools-mcp)](https://pypistats.org/packages/xlsx-tools-mcp) [![Downloads/week](https://img.shields.io/pypi/dw/xlsx-tools-mcp)](https://pypistats.org/packages/xlsx-tools-mcp)
+
+Live via [pypistats.org](https://pypistats.org/packages/xlsx-tools-mcp), non-mirror downloads. These count download events, not unique users or installs — one user can trigger many downloads (CI, reinstalls, Docker rebuilds, mirrors).
 
 ---
 
