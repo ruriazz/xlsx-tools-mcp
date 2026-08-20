@@ -2,7 +2,7 @@
 
 An MCP server for reading and writing Excel (.xlsx) files with high accuracy, while preserving the file's existing structure, styles, and formulas.
 
-[![CI](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml) ![PyPI Version](https://img.shields.io/pypi/v/xlsx-tools-mcp) [![Downloads/month](https://img.shields.io/pypi/dm/xlsx-tools-mcp)](https://pypistats.org/packages/xlsx-tools-mcp)
+[![CI](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ruriazz/xlsx-tools-mcp/actions/workflows/ci.yml) ![PyPI Version](https://img.shields.io/pypi/v/xlsx-tools-mcp) [![Downloads/month](https://img.shields.io/pypi/dm/xlsx-tools-mcp)](https://pypistats.org/packages/xlsx-tools-mcp) [![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/ruriazz/xlsx-tools-mcp)
 
 ---
 
