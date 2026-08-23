@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ruriazz/xlsx-tools-mcp",
+  "title": "xlsx-tools-mcp",
+  "description": "MCP server for accurate, structure-preserving read/write access to Excel (.xlsx) files",
+  "repository": {
+    "url": "https://github.com/ruriazz/xlsx-tools-mcp",
+    "source": "github"
+  },
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "xlsx-tools-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "XLSX_MCP_FILES",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Comma-separated alias=path pairs of workbooks to preload at startup"
+        },
+        {
+          "name": "XLSX_MCP_RECALC_TIMEOUT",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Timeout in seconds for the LibreOffice recalculation pass (default 60)"
+        },
+        {
+          "name": "XLSX_MCP_LOCK_TIMEOUT",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Timeout in seconds to acquire the per-file lock (default 10)"
+        }
+      ]
+    }
+  ]
+}
