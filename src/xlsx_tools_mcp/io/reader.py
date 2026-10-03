@@ -233,3 +233,56 @@ def search_workbook(
     if limit is not None:
         matches = matches[:limit]
     return matches
+
+
+def profile_sheet(path: str, sheet: str, sample_rows: int = 3) -> dict[str, Any]:
+    """Profile sheet data: inferred types, null counts, min/max, sample values.
+
+    Args:
+        path: Path to the .xlsx file.
+        sheet: Sheet name.
+        sample_rows: Number of non-null sample values to return per column.
+
+    Returns:
+        Summary dict containing row_count and list of column profiles.
+    """
+    data = read_sheet(path, sheet)["rows"]
+    if not data:
+        return {"row_count": 0, "columns": []}
+        
+    header = data[0]
+    columns = [str(h) if h is not None else f"col_{i}" for i, h in enumerate(header)]
+    
+    rows = data[1:]
+    row_count = len(rows)
+    
+    profiles = []
+    for c_idx, col_name in enumerate(columns):
+        col_values = [row[c_idx] for row in rows if c_idx < len(row)]
+        
+        non_null_values = [v for v in col_values if v is not None and v != ""]
+        null_count = row_count - len(non_null_values)
+        
+        types = set(type(v).__name__ for v in non_null_values)
+        inferred_type = "mixed" if len(types) > 1 else (list(types)[0] if types else "empty")
+        
+        numeric_values = [v for v in non_null_values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        min_val = min(numeric_values) if numeric_values else None
+        max_val = max(numeric_values) if numeric_values else None
+        
+        sample = non_null_values[:sample_rows]
+        
+        profiles.append({
+            "column": col_name,
+            "type": inferred_type,
+            "null_count": null_count,
+            "min": min_val,
+            "max": max_val,
+            "sample": sample
+        })
+        
+    return {
+        "row_count": row_count,
+        "columns": profiles
+    }
+

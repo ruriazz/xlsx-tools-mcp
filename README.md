@@ -243,7 +243,7 @@ With `alias`/`filename` as the alias:
 
 ## Tool reference
 
-All 25 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
+All 29 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
 
 > **Response shape (all write tools):** every write tool returns `{"saved": bool, "recalculated": bool, "errors_found": list, "message": str}`. When non-empty, `errors_found` is a list of `{"sheet": "...", "cell": "B2", "error": "#DIV/0!"}`.
 
@@ -258,6 +258,10 @@ All 25 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `get_cell(sheet, cell, path?)` | Full detail for a single cell: value (cached computed), formula, number format, font (bold/italic/size/color), fill color, merge state, comment. |
 | `search_workbook(query, sheet?, match_case?, limit?, path?)` | Substring search across one or all sheets. `sheet` restricts to one sheet; `match_case=True` makes it case-sensitive; `limit` caps matches. Returns `{"sheet", "cell", "value"}`. |
 | `aggregate_sheet(sheet, group_by, agg, cell_range?, has_header?, path?)` | Group and aggregate with pandas. `group_by` is a list of column names (taken from the header row); `agg` maps column name → aggregation function, e.g. `{"amount": "sum"}`. `has_header=True` (default) reads column names from the first row. Returns `{columns, records, row_count}`. |
+| `profile_sheet(sheet, sample_rows?, path?)` | Profile sheet metadata: inferred types, null counts, min/max, sample values. |
+| `query_sheet(sheet, filter_query, columns?, max_rows?, cell_range?, path?)` | Filter sheet data using pandas expressions. |
+| `create_table(sheet, cell_range, table_name, style_name?, show_filter?, show_row_stripes?, path?)` | Create a formal Excel Table over a range. |
+| `create_chart(sheet, chart_type, data_range, categories_range?, title?, target_cell?, path?)` | Add a native Excel chart (bar, line, pie, scatter). |
 
 ### Write
 

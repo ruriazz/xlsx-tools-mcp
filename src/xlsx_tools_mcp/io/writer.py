@@ -396,3 +396,124 @@ def clear_range(
 
     return _finalize(wb, path, recalc=clear_values, backup=backup)
 
+
+
+def create_table(
+    path: str,
+    sheet: str,
+    cell_range: str,
+    table_name: str,
+    style_name: str = "TableStyleMedium9",
+    show_filter: bool = True,
+    show_row_stripes: bool = True,
+    backup: bool = AUTO_BACKUP
+) -> dict[str, Any]:
+    """Create a formal Excel Table on the specified range.
+
+    Args:
+        path: Path to the .xlsx file.
+        sheet: Sheet name.
+        cell_range: A1-style range (e.g. "A1:D10").
+        table_name: Unique table identifier across the workbook.
+        style_name: Table style name (e.g. "TableStyleMedium9").
+        show_filter: Whether to display auto-filter dropdown arrows.
+        show_row_stripes: Whether to apply alternating row shading.
+        backup: Whether to create a backup before modifying the workbook.
+
+    Returns:
+        Standardized write result dict.
+    """
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.worksheet.filters import AutoFilter
+    
+    wb = _load(path)
+    ws = _ws(wb, sheet)
+    
+    for other_ws in wb.worksheets:
+        if table_name in other_ws.tables:
+            raise ValueError(f"Table name '{table_name}' already exists in sheet '{other_ws.title}'")
+            
+    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    if min_col is None or min_row is None or max_col is None or max_row is None:
+        raise ValueError(f"Invalid cell_range: {cell_range}")
+        
+    tab = Table(displayName=table_name, ref=cell_range)
+    style = TableStyleInfo(
+        name=style_name,
+        showFirstColumn=False,
+        showLastColumn=False,
+        showRowStripes=show_row_stripes,
+        showColumnStripes=False
+    )
+    tab.tableStyleInfo = style
+    
+    if not show_filter:
+        tab.autoFilter = None
+    else:
+        tab.autoFilter = AutoFilter(ref=cell_range)
+        
+    ws.add_table(tab)
+    return _finalize(wb, path, recalc=False, backup=backup)
+
+
+def create_chart(
+    path: str,
+    sheet: str,
+    chart_type: str,
+    data_range: str,
+    categories_range: str | None = None,
+    title: str = "Chart",
+    target_cell: str = "E2",
+    backup: bool = AUTO_BACKUP
+) -> dict[str, Any]:
+    """Create a native Excel chart (bar, line, pie, scatter).
+
+    Args:
+        path: Path to the .xlsx file.
+        sheet: Sheet name.
+        chart_type: One of "bar", "line", "pie", "scatter".
+        data_range: A1-style range holding the chart series values (e.g. "B1:B10").
+        categories_range: Optional A1-style range holding series category labels (e.g. "A2:A10").
+        title: Title string displayed on the chart.
+        target_cell: Cell coordinate where the top-left corner of the chart is placed.
+        backup: Whether to create a backup before modifying the workbook.
+
+    Returns:
+        Standardized write result dict.
+    """
+    from openpyxl.chart import BarChart, LineChart, PieChart, ScatterChart, Reference
+    
+    wb = _load(path)
+    ws = _ws(wb, sheet)
+    
+    chart_map = {
+        "bar": BarChart,
+        "line": LineChart,
+        "pie": PieChart,
+        "scatter": ScatterChart
+    }
+    
+    if chart_type.lower() not in chart_map:
+        raise ValueError(f"Unsupported chart type: {chart_type}. Supported: bar, line, pie, scatter.")
+        
+    chart = chart_map[chart_type.lower()]()
+    chart.title = title
+    
+    d_min_col, d_min_row, d_max_col, d_max_row = range_boundaries(data_range)
+    if any(v is None for v in (d_min_col, d_min_row, d_max_col, d_max_row)):
+        raise ValueError(f"Invalid data_range: {data_range}")
+        
+    data = Reference(ws, min_col=d_min_col, min_row=d_min_row, max_col=d_max_col, max_row=d_max_row)
+    chart.add_data(data, titles_from_data=True)
+    
+    if categories_range:
+        c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
+        if any(v is None for v in (c_min_col, c_min_row, c_max_col, c_max_row)):
+            raise ValueError(f"Invalid categories_range: {categories_range}")
+        cats = Reference(ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
+        chart.set_categories(cats)
+        
+    ws.add_chart(chart, target_cell)
+    
+    return _finalize(wb, path, recalc=False, backup=backup)
+

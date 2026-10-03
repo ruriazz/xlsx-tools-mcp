@@ -537,6 +537,85 @@ def recalculate_workbook(path: str | None = None) -> dict[str, Any]:
         }
 
 
+
+@mcp.tool()
+def profile_sheet(
+    sheet: str, sample_rows: int = 3, path: str | None = None
+) -> dict[str, Any]:
+    """Profile sheet data: metadata, inferred types, null counts, min/max, sample values.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        sample_rows: Number of non-null sample values to return per column.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: reader.profile_sheet(path, sheet, sample_rows))
+
+@mcp.tool()
+def query_sheet(
+    sheet: str, filter_query: str, columns: list[str] | None = None, max_rows: int = 100, cell_range: str | None = None, path: str | None = None
+) -> dict[str, Any]:
+    """Query sheet data using pandas expressions without loading entire sheet into context.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        filter_query: Pandas query expression (e.g. "status == 'PAID' and amount > 500").
+        columns: Optional list of columns to return.
+        max_rows: Maximum rows to return (default 100).
+        cell_range: Optional range to restrict reading before querying.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: transform.query_sheet(path, sheet, filter_query, columns, max_rows, cell_range))
+
+@mcp.tool()
+def create_table(
+    sheet: str, cell_range: str, table_name: str, style_name: str = "TableStyleMedium9", show_filter: bool = True, show_row_stripes: bool = True, backup: bool | None = None, path: str | None = None
+) -> dict[str, Any]:
+    """Create a formal Excel Table (ListObject) on the specified range.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        cell_range: A1-style range (e.g. "A1:D10").
+        table_name: Unique table identifier across the workbook.
+        style_name: Table style name (e.g. "TableStyleMedium9").
+        show_filter: Whether to display auto-filter dropdown arrows.
+        show_row_stripes: Whether to apply alternating row shading.
+        backup: Whether to create a backup before modifying the workbook.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.create_table(path, sheet, cell_range, table_name, style_name, show_filter, show_row_stripes, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+@mcp.tool()
+def create_chart(
+    sheet: str, chart_type: str, data_range: str, categories_range: str | None = None, title: str = "Chart", target_cell: str = "E2", backup: bool | None = None, path: str | None = None
+) -> dict[str, Any]:
+    """Create a native Excel chart (bar, line, pie, scatter).
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        chart_type: One of "bar", "line", "pie", "scatter".
+        data_range: A1-style range holding the chart series values (e.g. "B1:B10").
+        categories_range: Optional A1-style range holding series category labels (e.g. "A2:A10").
+        title: Title string displayed on the chart.
+        target_cell: Cell coordinate where the top-left corner of the chart is placed.
+        backup: Whether to create a backup before modifying the workbook.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.create_chart(path, sheet, chart_type, data_range, categories_range, title, target_cell, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+
 def main() -> None:
     mcp.run()
 

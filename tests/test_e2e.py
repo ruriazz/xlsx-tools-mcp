@@ -52,6 +52,24 @@ def test_e2e_sheet_workflow(test_file):
     assert read_array_after_clear["rows"][1] == [1.0, "Alice"]
 
 
+
+    # Phase 3
+    server.append_rows("Primary", [
+        ["Month", "Sales"],
+        ["Jan", 100],
+        ["Feb", 150],
+        ["Mar", 200]
+    ], path=test_file)
+    
+    prof = server.profile_sheet("Primary", path=test_file)
+    assert prof["row_count"] > 0
+    
+    q = server.query_sheet("Primary", "Sales > 100", cell_range="A4:B7", path=test_file)
+    assert q["row_count"] >= 2
+    
+    server.create_table("Primary", "A4:B7", "SalesTable", path=test_file)
+    server.create_chart("Primary", "bar", data_range="B4:B7", path=test_file)
+
 def test_e2e_backup_and_restore(test_file):
     # Enable backup
     server.write_cells("Sheet1", [{"cell": "A1", "value": "first"}], backup=True, path=test_file)
