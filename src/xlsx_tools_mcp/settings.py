@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 
 from .errors import FileNotConfiguredError, AccessDeniedError
 
@@ -12,12 +13,13 @@ LOCK_TIMEOUT_SECONDS = float(os.environ.get("XLSX_MCP_LOCK_TIMEOUT", "10"))
 AUTO_BACKUP = os.environ.get("XLSX_MCP_AUTO_BACKUP", "true").lower() in ("1", "true", "yes")
 BACKUP_DIR = str(Path(os.environ["XLSX_MCP_BACKUP_DIR"]).expanduser().resolve()) if os.environ.get("XLSX_MCP_BACKUP_DIR") else ""
 
+def _split_env_list(raw: str) -> list[str]:
+    return [entry.strip() for entry in re.split(r"[,;]", raw) if entry.strip()]
+
 def _parse_allowed_dirs(raw: str) -> list[str]:
     dirs = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if entry:
-            dirs.append(str(Path(entry).expanduser().resolve()))
+    for entry in _split_env_list(raw):
+        dirs.append(str(Path(entry).expanduser().resolve()))
     return dirs
 
 ALLOWED_DIRS = _parse_allowed_dirs(os.environ.get("XLSX_MCP_ALLOWED_DIRS", ""))
@@ -25,12 +27,9 @@ if BACKUP_DIR and ALLOWED_DIRS and BACKUP_DIR not in ALLOWED_DIRS:
     ALLOWED_DIRS.append(BACKUP_DIR)
 
 def _parse_configured_files(raw: str) -> dict[str, str]:
-    """Parse `name=path` or bare `path` entries (comma-separated) into alias -> absolute path."""
+    """Parse `name=path` or bare `path` entries (comma- or semicolon-separated) into alias -> absolute path."""
     files: dict[str, str] = {}
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
+    for entry in _split_env_list(raw):
         name, sep, path = entry.partition("=")
         path = path or name
         resolved = str(Path(path.strip()).expanduser().resolve())
@@ -40,7 +39,7 @@ def _parse_configured_files(raw: str) -> dict[str, str]:
 
 
 # Files preloaded at startup so tools can be called without hunting for a path.
-# Format: "e2e.xlsx=/abs/path/to/e2e.xlsx,report=/abs/path/report.xlsx" or just
+# Format: "e2e.xlsx=/abs/path/to/e2e.xlsx,report=/abs/path/report.xlsx" or semicolon-separated
 # bare absolute paths (alias defaults to the filename).
 CONFIGURED_FILES: dict[str, str] = _parse_configured_files(os.environ.get("XLSX_MCP_FILES", ""))
 
@@ -52,9 +51,11 @@ def _check_allowed(resolved_path: str) -> str:
     rp = str(Path(resolved_path).resolve())
     for allowed in ALLOWED_DIRS:
         try:
-            if os.path.commonpath([rp, allowed]) == allowed:
+            common = os.path.commonpath([rp, allowed])
+            if os.path.normcase(common) == os.path.normcase(allowed):
                 return resolved_path
         except ValueError:
+            # Raised when paths are on different drives on Windows (e.g. C: vs D:)
             pass
     raise AccessDeniedError(f"Access denied: Path {resolved_path} is outside allowed directories.")
 

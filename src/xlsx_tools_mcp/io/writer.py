@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import datetime
 import os
 from pathlib import Path
+import re
+import shutil
+import sys
+import time
 from typing import Any
 
 import openpyxl
@@ -10,14 +15,13 @@ from openpyxl.utils import range_boundaries
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from ..errors import FileInUseError, SheetNotFoundError, UnsafeFormulaError
+from ..locking import safe_replace
 from ..recalc import recalculate
-
-import re
-import shutil
-import datetime
-from ..errors import SheetNotFoundError, UnsafeFormulaError
 from .. import settings
 from ..settings import AUTO_BACKUP, BACKUP_DIR
+
+_safe_replace = safe_replace
 
 
 
@@ -61,10 +65,13 @@ def restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
     tmp_path = f"{target_path}.tmp-{os.getpid()}"
     try:
         shutil.copy2(backup_path, tmp_path)
-        os.replace(tmp_path, target_path)
+        _safe_replace(tmp_path, target_path)
     finally:
         if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
     
     return {"restored": True, "target": target_path, "backup": backup_path, "message": "Backup restored successfully."}
 
@@ -83,17 +90,21 @@ def _atomic_save(wb: Workbook, path: str, backup: bool = False) -> None:
 
     A plain `wb.save(path)` writes straight onto the target — if the process dies
     mid-write (crash, OOM kill, disk full), the file is left half-written and
-    unrecoverable. `os.replace` only swaps the two once the temp file is complete.
+    unrecoverable. `_safe_replace` only swaps the two once the temp file is complete
+    and retries transient locks.
     """
     if backup:
         _create_backup(path)
     tmp_path = f"{path}.tmp-{os.getpid()}"
     try:
         wb.save(tmp_path)
-        os.replace(tmp_path, path)
+        _safe_replace(tmp_path, path)
     finally:
         if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def _finalize(wb: Workbook, path: str, recalc: bool = True, backup: bool = False) -> dict[str, Any]:
@@ -103,8 +114,10 @@ def _finalize(wb: Workbook, path: str, recalc: bool = True, backup: bool = False
     style, sheet add/remove) that can't produce a stale formula result — recalc is
     still cheap to run for anything that touches cell values or formulas.
     """
-    _atomic_save(wb, path, backup=backup)
-    wb.close()
+    try:
+        _atomic_save(wb, path, backup=backup)
+    finally:
+        wb.close()
     if not recalc:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Saved (no recalculation needed)."}
 

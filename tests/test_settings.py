@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 
 import pytest
 
-from xlsx_tools_mcp.errors import FileNotConfiguredError
+from xlsx_tools_mcp.errors import AccessDeniedError, FileNotConfiguredError
 from xlsx_tools_mcp.settings import CONFIGURED_FILES, _parse_configured_files, resolve_path
 
 
@@ -55,9 +56,28 @@ def test_resolve_filename_match(monkeypatch):
 
 def test_resolve_unknown_path_returned_as_is(monkeypatch):
     monkeypatch.setattr("xlsx_tools_mcp.settings.CONFIGURED_FILES", {"a": "/x/a.xlsx"})
-    assert resolve_path("/some/other.xlsx") == "/some/other.xlsx"
-from xlsx_tools_mcp.errors import AccessDeniedError
-import os
+    expected = str(Path("/some/other.xlsx").expanduser().resolve())
+    assert resolve_path("/some/other.xlsx") == expected
+
+
+def test_parse_configured_files_delimiters():
+    parsed = _parse_configured_files("a=/x/y/z.xlsx; b=/m/n.xlsx , c=/p/q.xlsx")
+    assert parsed == {
+        "a": _resolved("/x/y/z.xlsx"),
+        "b": _resolved("/m/n.xlsx"),
+        "c": _resolved("/p/q.xlsx"),
+    }
+
+
+def test_parse_allowed_dirs_delimiters():
+    from xlsx_tools_mcp.settings import _parse_allowed_dirs
+    dirs = _parse_allowed_dirs("/path/one ; /path/two , /path/three")
+    assert dirs == [
+        _resolved("/path/one"),
+        _resolved("/path/two"),
+        _resolved("/path/three"),
+    ]
+
 
 def test_resolve_path_allowed_dirs(monkeypatch, tmp_path):
     allowed_dir = str(tmp_path / "allowed")
@@ -70,6 +90,41 @@ def test_resolve_path_allowed_dirs(monkeypatch, tmp_path):
     file_outside = str(tmp_path / "outside" / "file.xlsx")
     with pytest.raises(AccessDeniedError):
         resolve_path(file_outside)
+
+
+def test_resolve_path_allowed_dirs_case_insensitive(monkeypatch):
+    import ntpath
+    monkeypatch.setattr("xlsx_tools_mcp.settings.ALLOWED_DIRS", [r"C:\Users\John\AllowedCase"])
+    monkeypatch.setattr("os.path.commonpath", ntpath.commonpath)
+    monkeypatch.setattr("os.path.normcase", ntpath.normcase)
+
+    class FakePath:
+        def __init__(self, p):
+            self._p = str(p)
+        def resolve(self):
+            return self._p
+        def __str__(self):
+            return self._p
+
+    monkeypatch.setattr("xlsx_tools_mcp.settings.Path", FakePath)
+
+    from xlsx_tools_mcp.settings import _check_allowed
+    file_inside_lower = r"c:\users\john\allowedcase\file.xlsx"
+    assert _check_allowed(file_inside_lower) == file_inside_lower
+
+
+def test_resolve_path_allowed_dirs_different_drives(monkeypatch, tmp_path):
+    allowed_dir = str(tmp_path / "allowed")
+    monkeypatch.setattr("xlsx_tools_mcp.settings.ALLOWED_DIRS", [allowed_dir])
+
+    # Simulate ValueError from os.path.commonpath across different Windows drives
+    def mock_commonpath(paths):
+        raise ValueError("Paths don't have the same drive")
+
+    monkeypatch.setattr("os.path.commonpath", mock_commonpath)
+
+    with pytest.raises(AccessDeniedError):
+        resolve_path(str(tmp_path / "other" / "file.xlsx"))
 
 def test_resolve_path_allowed_dirs_empty(monkeypatch, tmp_path):
     monkeypatch.setattr("xlsx_tools_mcp.settings.ALLOWED_DIRS", [])
