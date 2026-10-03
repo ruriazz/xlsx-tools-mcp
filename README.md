@@ -22,12 +22,13 @@ It is built around the principle that editing an existing workbook should **not*
 - **pandas-based grouping/aggregation & querying** — `aggregate_sheet` and `query_sheet` perform operations without destroying source structure, equipped with AST expression validation to block code injection.
 - **Native Excel objects** — create formal Excel Tables (`create_table`) with autofilter and styles, and native charts (`create_chart` for bar, line, pie, scatter).
 - **Sheet lifecycle & formatting** — rename sheets (`rename_sheet`), duplicate sheets with styles intact (`copy_sheet`), clear ranges (`clear_range`), and auto-fit column widths (`autofit_columns`).
+- **Cross-platform reliability (Windows, macOS, Linux)** — case-insensitive path confinement, comma or semicolon `;` environment delimiters, safe atomic file replacement with transient lock retry (`WinError 32` / antivirus defense), and silent headless recalculation without window flicker.
 - **Per-file locking** — concurrent tool calls (or other processes) touching the same workbook are serialized via a sibling `<path>.lock` file (filelock), so writes never interleave and corrupt the file.
-- **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`.
+- **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma or semicolon-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`. Case-insensitive path comparisons and multi-drive paths on Windows are supported.
 - **Auto-backup & restore** — Write tools automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `restore_backup` to atomically revert changes.
 - **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, `REGISTER`, or DDE commands (`|`) by default to prevent data exfiltration or malicious links. Pass `allow_external_formulas=True` to bypass this check.
 - **XML-bomb protection** — the `defusedxml` package is an automatic dependency; openpyxl detects it and uses its hardened XML parser, so hostile `xlsx` XML can't expand into resource exhaustion.
-- **Preload files at startup** — set `XLSX_MCP_FILES` to preload one or more workbooks; tools can then be called with `path` omitted or with a short alias instead of a full filesystem path.
+- **Preload files at startup** — set `XLSX_MCP_FILES` to preload one or more workbooks (comma or semicolon-separated); tools can then be called with `path` omitted or with a short alias instead of a full filesystem path.
 
 ---
 
@@ -80,9 +81,12 @@ brew install --cask libreoffice
 
 # Debian / Ubuntu
 sudo apt-get install -y libreoffice-calc
+
+# Windows
+winget install TheDocumentFoundation.LibreOffice
 ```
 
-The server finds LibreOffice by checking `soffice` / `libreoffice` on `PATH` and the standard macOS install location (`/Applications/LibreOffice.app/Contents/MacOS/soffice`).
+The server finds LibreOffice by checking `soffice` / `libreoffice` on `PATH`, the standard macOS install location (`/Applications/LibreOffice.app/Contents/MacOS/soffice`), and standard Windows paths (`%ProgramFiles%\LibreOffice\program\soffice.exe`, etc.). On Windows, headless recalculation runs silently without window flicker (`CREATE_NO_WINDOW`) and with isolated user profiles.
 
 ---
 
@@ -125,6 +129,8 @@ xlsx-tools-mcp
 ## Configuration for MCP clients
 
 The simplest registration for every client uses `uvx xlsx-tools-mcp` (no clone, always the published version).
+
+> **Tip for Windows:** In JSON client configuration files (`.mcp.json`, `opencode.json`), use forward slashes (e.g. `"C:/path/to/data.xlsx"`) or escaped backslashes (e.g. `"C:\\\\path\\\\to\\\\data.xlsx"`) to prevent JSON escape sequence errors.
 
 ### Claude Code
 
@@ -191,7 +197,7 @@ Replace `/absolute/path/to/xlsx-reader` with the actual location of your clone.
 
 ## Preloading files (`XLSX_MCP_FILES`)
 
-Set the `XLSX_MCP_FILES` environment variable in the **MCP server config `env`** section (not your interactive shell — the server is launched by the client) to preload workbooks at startup. Format: comma-separated `alias=absolute/path` entries, or bare absolute paths:
+Set the `XLSX_MCP_FILES` environment variable in the **MCP server config `env`** section (not your interactive shell — the server is launched by the client) to preload workbooks at startup. Format: comma- or semicolon-separated `alias=absolute/path` entries, or bare absolute paths:
 
 ```
 XLSX_MCP_FILES=name=/abs/path/to/name.xlsx,report=/data/report.xlsx
@@ -367,8 +373,8 @@ If a formula this touches produced an error, `errors_found` would look like:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `XLSX_MCP_FILES` | *empty* | Comma-separated `alias=path` or `path` to preload at startup. |
-| `XLSX_MCP_ALLOWED_DIRS` | *empty* | Comma-separated directories to confine file access (paths outside raise `AccessDeniedError`). |
+| `XLSX_MCP_FILES` | *empty* | Comma or semicolon-separated `alias=path` or `path` to preload at startup. |
+| `XLSX_MCP_ALLOWED_DIRS` | *empty* | Comma or semicolon-separated directories to confine file access (paths outside raise `AccessDeniedError`). Supports case-insensitivity on Windows. |
 | `XLSX_MCP_AUTO_BACKUP` | `true` | Automatically create a `.bak` copy before modifying a workbook. |
 | `XLSX_MCP_BACKUP_DIR` | *empty* | Custom directory for backup files (defaults to beside the target file). |
 | `XLSX_MCP_RECALC_TIMEOUT` | `60` | Timeout in seconds for headless LibreOffice formula recalculation. |
@@ -378,12 +384,13 @@ If a formula this touches produced an error, `errors_found` would look like:
 
 ## Security & concurrency
 
-- **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`.
+- **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma or semicolon-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`. Case-insensitive path comparisons and multi-drive paths on Windows are supported.
 - **Auto-backup & restore** — Write tools will automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `XLSX_MCP_BACKUP_DIR` to save backups to a specific folder. Use `restore_backup` to atomically revert changes.
 - **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, `REGISTER`, or DDE commands (`|`) by default to prevent data exfiltration or command execution. Pass `allow_external_formulas=True` to bypass this check.
 - **AST safe query validation** — `query_sheet` uses an AST parser to strictly allow only comparisons, boolean logic, and safe operators, blocking `@` variable lookups, code execution calls, and private dunder attributes.
 - **XML-bomb protection** — `defusedxml` is an automatic dependency of this package. openpyxl auto-detects it and uses its hardened XML parser, so a malicious `.xlsx` (a zip of XML) can't trigger entity-expansion resource exhaustion. No configuration needed.
 - **Per-file locking** — every read/write acquires a sibling `<path>.lock` file (via `filelock`). Concurrent tool calls or other processes touching the same workbook are serialized so writes never interleave and corrupt the file.
+- **Transient lock resilience** — on Windows NTFS, atomic file swaps can momentarily encounter sharing violations (`WinError 32` / `33`) while antivirus scanners or search indexers inspect newly saved files. The server performs an exponential backoff retry to transparently succeed once released, or provides a clear guidance message if the file is permanently open in Microsoft Excel.
 - **Recalc timeout** — `XLSX_MCP_RECALC_TIMEOUT` (seconds, default `60`) caps how long the LibreOffice recalculation pass may run.
 - **Lock timeout** — `XLSX_MCP_LOCK_TIMEOUT` (seconds, default `10`) caps how long a tool will wait to acquire the per-file lock before failing.
 
@@ -394,6 +401,7 @@ If a formula this touches produced an error, `errors_found` would look like:
 - **`errors_found` is empty even though my formula is broken** — recalculation likely didn't run. Check the `message` field: if it says LibreOffice wasn't found, the file was saved via openpyxl as-is and formulas were **not** recomputed (cached values may be stale). Install LibreOffice (see [Requirements](#requirements)).
 - **Recalculation is slow or times out** — raise `XLSX_MCP_RECALC_TIMEOUT` (default 60s). On timeout, the file is still saved, but `recalculated` will be `false` and `message` says the recalc timed out.
 - **`LockTimeoutError` on concurrent access** — another operation holds the lock. Raise `XLSX_MCP_LOCK_TIMEOUT` (default 10s), or retry when the other operation finishes.
+- **`Workbook is locked by another process` / `WinError 32`** — on Windows, Microsoft Excel and some applications lock open files exclusively. Close the workbook in Excel and retry. Transient locks from antivirus scanners or search indexers are automatically retried by the server before failing.
 - **"Sheet not found"** — the error message lists the available sheet names, so you can pick the correct one.
 - **`path` required / no file configured** — you called a tool without `path` but no (or multiple) files are preloaded. Preload one file via `XLSX_MCP_FILES`, pass an explicit alias, or pass a raw path.
 

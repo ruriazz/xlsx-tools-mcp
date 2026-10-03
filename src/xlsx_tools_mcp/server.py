@@ -56,6 +56,11 @@ def _run(fn: Callable[[], T]) -> T:
         raise ValueError(str(exc)) from exc
     except FileExistsError as exc:
         raise ValueError(str(exc)) from exc
+    except PermissionError as exc:
+        winerror = getattr(exc, "winerror", None)
+        if winerror in (32, 33):
+            raise ValueError(f"File is currently locked by another application: {getattr(exc, 'filename', None) or 'target file'}") from exc
+        raise ValueError(f"Permission denied: {exc}") from exc
 
 
 

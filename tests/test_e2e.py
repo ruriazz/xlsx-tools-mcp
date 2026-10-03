@@ -87,3 +87,30 @@ def test_e2e_backup_and_restore(test_file):
     read_array = server.read_sheet("Sheet1", path=test_file)
     assert read_array["rows"] == []
 
+
+def test_e2e_cross_platform_config(tmp_path, monkeypatch):
+    data_dir = tmp_path / "Data"
+    data_dir.mkdir()
+    other_dir = tmp_path / "Other"
+    other_dir.mkdir()
+
+    file_a = data_dir / "book_a.xlsx"
+    file_b = other_dir / "book_b.xlsx"
+    server.create_workbook(str(file_a), ["Data"])
+    server.create_workbook(str(file_b), ["Data"])
+
+    # Test semicolon delimiter across allowed dirs
+    from xlsx_tools_mcp import settings
+    raw_dirs = f"{data_dir};{other_dir}"
+    monkeypatch.setenv("XLSX_MCP_ALLOWED_DIRS", raw_dirs)
+    monkeypatch.setattr(settings, "ALLOWED_DIRS", settings._parse_allowed_dirs(raw_dirs))
+
+    # Operations in both allowed dirs should succeed
+    server.write_cells("Data", [{"cell": "A1", "value": "A"}], path=str(file_a))
+    server.write_cells("Data", [{"cell": "A1", "value": "B"}], path=str(file_b))
+
+    # Operation outside allowed dirs should fail with AccessDeniedError / ValueError
+    outside_file = tmp_path / "outside.xlsx"
+    with pytest.raises(ValueError, match="Access denied"):
+        server.create_workbook(str(outside_file), ["Data"])
+

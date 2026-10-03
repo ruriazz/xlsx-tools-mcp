@@ -246,3 +246,64 @@ def test_auto_backup_creation_and_restore(workbook_path, monkeypatch, tmp_path):
     assert reader.read_sheet(workbook_path, "Data")["rows"][0][0] == "original"
 
 
+def test_safe_replace_transient_lock(monkeypatch, tmp_path):
+    src = tmp_path / "src.tmp"
+    dst = tmp_path / "dst.xlsx"
+    src.write_text("test")
+
+    attempts = 0
+
+    def mock_replace(s, d):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            exc = PermissionError("Locked by antivirus")
+            exc.winerror = 32
+            raise exc
+        return None
+
+    monkeypatch.setattr("os.replace", mock_replace)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    writer._safe_replace(src, dst)
+    assert attempts == 3
+
+
+def test_safe_replace_persistent_lock_raises_file_in_use(monkeypatch, tmp_path):
+    from xlsx_tools_mcp.errors import FileInUseError
+
+    src = tmp_path / "src.tmp"
+    dst = tmp_path / "dst.xlsx"
+    src.write_text("test")
+
+    def mock_replace(s, d):
+        exc = PermissionError("Locked by Excel")
+        exc.winerror = 32
+        raise exc
+
+    monkeypatch.setattr("os.replace", mock_replace)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+
+    with pytest.raises(FileInUseError, match="locked by another process"):
+        writer._safe_replace(src, dst)
+
+
+def test_server_run_translates_permission_error():
+    from xlsx_tools_mcp import server
+
+    def fail_winerror():
+        exc = PermissionError("Sharing violation")
+        exc.winerror = 32
+        exc.filename = "report.xlsx"
+        raise exc
+
+    with pytest.raises(ValueError, match="currently locked by another application"):
+        server._run(fail_winerror)
+
+    def fail_other_permission():
+        raise PermissionError("Access denied")
+
+    with pytest.raises(ValueError, match="Permission denied"):
+        server._run(fail_other_permission)
+
+

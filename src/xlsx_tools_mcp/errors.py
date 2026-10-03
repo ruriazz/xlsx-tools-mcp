@@ -20,3 +20,7 @@ class AccessDeniedError(XlsxMcpError):
 
 class UnsafeFormulaError(XlsxMcpError):
     """Raised when an unsafe formula function is detected."""
+
+
+class FileInUseError(XlsxMcpError):
+    """Raised when a file cannot be saved/overwritten because it is locked by another process."""

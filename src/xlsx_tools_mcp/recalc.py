@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,18 +11,14 @@ from typing import Any
 
 import openpyxl
 
+from .errors import FileInUseError
+from .locking import safe_replace
 from .settings import SOFFICE_TIMEOUT_SECONDS
 
 # All standard Excel formula error values, including the newer dynamic-array ones.
 EXCEL_ERROR_VALUES = {
     "#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#NULL!", "#NUM!", "#N/A", "#SPILL!", "#CALC!",
 }
-
-_SOFFICE_CANDIDATES = (
-    "/Applications/LibreOffice.app/Contents/MacOS/soffice",  # macOS default install
-    "soffice",      # Linux / PATH
-    "libreoffice",  # some Linux distros
-)
 
 
 @dataclass
@@ -33,13 +30,34 @@ class RecalcResult:
 
 def find_soffice() -> str | None:
     """Locate the LibreOffice binary, checking PATH and common install locations."""
-    for candidate in _SOFFICE_CANDIDATES:
-        found = shutil.which(candidate)
+    # 1. PATH lookup (Linux, macOS, Windows if added to PATH)
+    for bin_name in ("soffice", "libreoffice", "soffice.exe"):
+        found = shutil.which(bin_name)
         if found:
             return found
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+
+    # 2. Standard macOS path
+    mac_path = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+    if sys.platform == "darwin" and os.path.isfile(mac_path) and os.access(mac_path, os.X_OK):
+        return mac_path
+
+    # 3. Standard Windows paths
+    if sys.platform == "win32":
+        win_candidates = [
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "LibreOffice", "program", "soffice.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "LibreOffice", "program", "soffice.exe"),
+        ]
+        local_app_data = os.environ.get("LocalAppData")
+        if local_app_data:
+            win_candidates.append(os.path.join(local_app_data, "Programs", "LibreOffice", "program", "soffice.exe"))
+        for candidate in win_candidates:
+            if os.path.isfile(candidate):
+                return candidate
+
     return None
+
+
+_orig_find_soffice = find_soffice
 
 
 def scan_formula_errors(path: str) -> list[dict[str, Any]]:
@@ -73,7 +91,7 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
             message=(
                 "LibreOffice (soffice) not found on PATH. The file was saved but formulas "
                 "were not recalculated — cached values may be stale until it is installed. "
-                "macOS: brew install --cask libreoffice · Linux: apt-get install libreoffice-calc"
+                "macOS: brew install --cask libreoffice · Linux: apt-get install libreoffice-calc · Windows: winget install TheDocumentFoundation.LibreOffice"
             ),
         )
 
@@ -82,18 +100,25 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
         tmp_input = Path(tmpdir) / src.name
         shutil.copy(src, tmp_input)
 
+        profile_dir = Path(tmpdir) / "lo_profile"
         cmd = [
             soffice,
             "--headless",
             "--norestore",
+            "--nofirststartwizard",
+            f"-env:UserInstallation={profile_dir.as_uri()}",
             "--infilter=Calc MS Excel 2007 XML",
             "--convert-to", "xlsx",
             "--outdir", tmpdir,
             str(tmp_input),
         ]
 
+        extra_kwargs: dict[str, Any] = {}
+        if sys.platform == "win32":
+            extra_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
         try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout, **extra_kwargs)
         except subprocess.TimeoutExpired:
             return RecalcResult(
                 success=False,
@@ -121,8 +146,19 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
         staged = src.parent / f"{src.name}.tmp-{os.getpid()}"
         try:
             shutil.copy(tmp_output, staged)
-            os.replace(staged, src)
+            try:
+                safe_replace(staged, src)
+            except FileInUseError:
+                return RecalcResult(
+                    success=False,
+                    message=f"LibreOffice recalculated formulas, but could not overwrite '{src}' because it is locked by another application.",
+                )
+            except PermissionError as exc:
+                return RecalcResult(
+                    success=False,
+                    message=f"LibreOffice recalculated formulas, but permission was denied when overwriting '{src}': {exc}",
+                )
         finally:
             staged.unlink(missing_ok=True)
 
-    return RecalcResult(success=True, errors_found=errors_found, message="Recalculated with LibreOffice headless.")
+        return RecalcResult(success=True, errors_found=errors_found, message="Recalculated with LibreOffice headless.")

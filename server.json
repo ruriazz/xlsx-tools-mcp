@@ -7,12 +7,12 @@
     "url": "https://github.com/ruriazz/xlsx-tools-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "xlsx-tools-mcp",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "transport": {
         "type": "stdio"
       },
@@ -22,7 +22,7 @@
           "isRequired": false,
           "isSecret": false,
           "format": "string",
-          "description": "Comma-separated alias=path pairs of workbooks to preload at startup"
+          "description": "Comma or semicolon-separated alias=path pairs of workbooks to preload at startup"
         },
         {
           "name": "XLSX_MCP_RECALC_TIMEOUT",
@@ -43,7 +43,7 @@
           "isRequired": false,
           "isSecret": false,
           "format": "string",
-          "description": "Comma-separated list of allowed directories to restrict file access"
+          "description": "Comma or semicolon-separated list of allowed directories to restrict file access (supports case-insensitivity on Windows)"
         },
         {
           "name": "XLSX_MCP_AUTO_BACKUP",
