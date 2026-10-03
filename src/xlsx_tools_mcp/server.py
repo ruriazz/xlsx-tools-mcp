@@ -20,6 +20,7 @@ from mcp.server import MCPServer
 
 from .errors import XlsxMcpError
 from .io import reader, transform, writer
+from .io.writer import restore_backup as io_restore_backup
 from .locking import file_lock
 from .recalc import recalculate
 from .settings import CONFIGURED_FILES, resolve_path
@@ -57,7 +58,22 @@ def _run(fn: Callable[[], T]) -> T:
         raise ValueError(str(exc)) from exc
 
 
+
+@mcp.tool()
+def restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
+    """Restore a backup file over a target workbook atomically.
+
+    Args:
+        backup_path: Path to the .bak file to restore from.
+        target_path: Path to the target .xlsx/.xlsm file to overwrite.
+    """
+    backup_path = _run(lambda: resolve_path(backup_path))
+    target_path = _run(lambda: resolve_path(target_path))
+    with file_lock(target_path):
+        return _run(lambda: io_restore_backup(backup_path, target_path))
+
 # ── Inspect / read ────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def list_configured_files() -> dict[str, str]:
@@ -98,9 +114,14 @@ def get_workbook_info(path: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def read_sheet(
-    sheet: str, cell_range: str | None = None, max_rows: int | None = None, path: str | None = None
+    sheet: str,
+    cell_range: str | None = None,
+    max_rows: int | None = None,
+    offset_row: int = 0,
+    format: str = "array",
+    path: str | None = None,
 ) -> dict[str, Any]:
-    """Read cell values from a sheet as a 2D array, addressed absolutely from A1.
+    """Read cell values from a sheet.
 
     Args:
         path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
@@ -108,10 +129,12 @@ def read_sheet(
         sheet: Sheet name.
         cell_range: Optional A1-style range (e.g. "B2:F20"). Omit to read the full used area.
         max_rows: Optional cap on the number of rows returned, to bound response size for large sheets.
+        offset_row: Skip a number of data rows (0-indexed from first data row).
+        format: "array" (default 2D list), "records" (list of dicts, first row as keys), or "markdown" (table string).
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: reader.read_sheet(path, sheet, cell_range, max_rows))
+        return _run(lambda: reader.read_sheet(path, sheet, cell_range, max_rows, offset_row, format))
 
 
 @mcp.tool()
@@ -184,6 +207,7 @@ def create_workbook(path: str, sheets: list[str] | None = None, overwrite: bool 
         sheets: Sheet names to create (defaults to a single "Sheet1").
         overwrite: Replace an existing file at path when True.
     """
+    path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: writer.create_workbook(path, sheets, overwrite))
 
@@ -194,6 +218,8 @@ def write_cells(
     cells: list[dict[str, Any]],
     create_sheet_if_missing: bool = False,
     recalculate: bool = True,
+    allow_external_formulas: bool = False,
+    backup: bool | None = None,
     path: str | None = None,
 ) -> dict[str, Any]:
     """Write values and/or formulas into specific cells, then recalculate the workbook.
@@ -214,7 +240,7 @@ def write_cells(
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.write_cells(path, sheet, cells, create_sheet_if_missing, recalculate))
+        return _run(lambda: writer.write_cells(path, sheet, cells, create_sheet_if_missing, recalculate, allow_external_formulas, backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
@@ -223,6 +249,8 @@ def append_rows(
     rows: list[list[Any]],
     create_sheet_if_missing: bool = False,
     recalculate: bool = True,
+    allow_external_formulas: bool = False,
+    backup: bool | None = None,
     path: str | None = None,
 ) -> dict[str, Any]:
     """Append rows after the last used row of a sheet, then recalculate the workbook.
@@ -240,11 +268,11 @@ def append_rows(
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.append_rows(path, sheet, rows, create_sheet_if_missing, recalculate))
+        return _run(lambda: writer.append_rows(path, sheet, rows, create_sheet_if_missing, recalculate, allow_external_formulas, backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
-def create_sheet(sheet: str, index: int | None = None, path: str | None = None) -> dict[str, Any]:
+def create_sheet(sheet: str, index: int | None = None, backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
     """Add a new empty sheet to an existing workbook.
 
     Args:
@@ -255,11 +283,11 @@ def create_sheet(sheet: str, index: int | None = None, path: str | None = None) 
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.create_sheet(path, sheet, index))
+        return _run(lambda: writer.create_sheet(path, sheet, index, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
-def delete_sheet(sheet: str, path: str | None = None) -> dict[str, Any]:
+def delete_sheet(sheet: str, backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
     """Delete a sheet from a workbook. Fails if it is the only sheet left.
 
     Args:
@@ -269,12 +297,12 @@ def delete_sheet(sheet: str, path: str | None = None) -> dict[str, Any]:
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.delete_sheet(path, sheet))
+        return _run(lambda: writer.delete_sheet(path, sheet, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
 def insert_rows(
-    sheet: str, start_row: int, count: int = 1, recalculate: bool = True, path: str | None = None
+    sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, path: str | None = None
 ) -> dict[str, Any]:
     """Insert blank rows, shifting existing rows down.
 
@@ -291,12 +319,12 @@ def insert_rows(
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.insert_rows(path, sheet, start_row, count, recalculate))
+        return _run(lambda: writer.insert_rows(path, sheet, start_row, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
 def delete_rows(
-    sheet: str, start_row: int, count: int = 1, recalculate: bool = True, path: str | None = None
+    sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, path: str | None = None
 ) -> dict[str, Any]:
     """Delete rows, shifting the rows below them upward.
 
@@ -313,12 +341,12 @@ def delete_rows(
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.delete_rows(path, sheet, start_row, count, recalculate))
+        return _run(lambda: writer.delete_rows(path, sheet, start_row, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
 def insert_columns(
-    sheet: str, start_column: int, count: int = 1, recalculate: bool = True, path: str | None = None
+    sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, path: str | None = None
 ) -> dict[str, Any]:
     """Insert blank columns, shifting existing columns right.
 
@@ -335,12 +363,12 @@ def insert_columns(
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.insert_columns(path, sheet, start_column, count, recalculate))
+        return _run(lambda: writer.insert_columns(path, sheet, start_column, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
 def delete_columns(
-    sheet: str, start_column: int, count: int = 1, recalculate: bool = True, path: str | None = None
+    sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, path: str | None = None
 ) -> dict[str, Any]:
     """Delete columns, shifting the columns to their right leftward.
 
@@ -357,11 +385,11 @@ def delete_columns(
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.delete_columns(path, sheet, start_column, count, recalculate))
+        return _run(lambda: writer.delete_columns(path, sheet, start_column, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
-def merge_cells(sheet: str, cell_range: str, path: str | None = None) -> dict[str, Any]:
+def merge_cells(sheet: str, cell_range: str, backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
     """Merge a rectangular range of cells into one.
 
     Args:
@@ -372,11 +400,11 @@ def merge_cells(sheet: str, cell_range: str, path: str | None = None) -> dict[st
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.merge_cells(path, sheet, cell_range))
+        return _run(lambda: writer.merge_cells(path, sheet, cell_range, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
-def unmerge_cells(sheet: str, cell_range: str, path: str | None = None) -> dict[str, Any]:
+def unmerge_cells(sheet: str, cell_range: str, backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
     """Undo a merge on a range of cells.
 
     Args:
@@ -387,11 +415,11 @@ def unmerge_cells(sheet: str, cell_range: str, path: str | None = None) -> dict[
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.unmerge_cells(path, sheet, cell_range))
+        return _run(lambda: writer.unmerge_cells(path, sheet, cell_range, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
-def set_cell_style(sheet: str, cell_range: str, style: dict[str, Any], path: str | None = None) -> dict[str, Any]:
+def set_cell_style(sheet: str, cell_range: str, style: dict[str, Any], backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
     """Apply formatting to a range of cells.
 
     Args:
@@ -405,7 +433,88 @@ def set_cell_style(sheet: str, cell_range: str, style: dict[str, Any], path: str
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.set_cell_style(path, sheet, cell_range, style))
+        return _run(lambda: writer.set_cell_style(path, sheet, cell_range, style, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+
+@mcp.tool()
+def rename_sheet(old_name: str, new_name: str, backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
+    """Rename an existing sheet.
+
+    Warning: This tool does NOT automatically update formula references in other sheets.
+    Formulas depending on the old sheet name will break.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        old_name: Current name of the sheet.
+        new_name: New name for the sheet (1-31 chars, valid Excel sheet name).
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.rename_sheet(path, old_name, new_name, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+
+@mcp.tool()
+def copy_sheet(source_sheet: str, target_sheet: str, backup: bool | None = None, path: str | None = None) -> dict[str, Any]:
+    """Duplicate a sheet including its contents, formulas, and styles.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        source_sheet: Name of the sheet to duplicate.
+        target_sheet: Name of the new sheet (1-31 chars, valid Excel sheet name).
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.copy_sheet(path, source_sheet, target_sheet, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+
+@mcp.tool()
+def autofit_columns(
+    sheet: str,
+    min_width: int = 10,
+    max_width: int = 50,
+    padding: int = 3,
+    backup: bool | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Automatically adjust column widths based on maximum text length.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        min_width: Minimum allowed column width.
+        max_width: Maximum allowed column width.
+        padding: Extra padding characters to add to max length.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.autofit_columns(path, sheet, min_width, max_width, padding, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+
+@mcp.tool()
+def clear_range(
+    sheet: str,
+    cell_range: str,
+    clear_values: bool = True,
+    clear_styles: bool = False,
+    backup: bool | None = None,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Clear cell values and/or styles within a specified range without deleting rows or columns.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        cell_range: A1-style range (e.g. "A1:D10") to clear.
+        clear_values: Whether to clear cell values (True by default).
+        clear_styles: Whether to clear cell styles/formats (False by default).
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.clear_range(path, sheet, cell_range, clear_values, clear_styles, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 @mcp.tool()
@@ -426,6 +535,85 @@ def recalculate_workbook(path: str | None = None) -> dict[str, Any]:
             "errors_found": result.errors_found,
             "message": result.message,
         }
+
+
+
+@mcp.tool()
+def profile_sheet(
+    sheet: str, sample_rows: int = 3, path: str | None = None
+) -> dict[str, Any]:
+    """Profile sheet data: metadata, inferred types, null counts, min/max, sample values.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        sample_rows: Number of non-null sample values to return per column.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: reader.profile_sheet(path, sheet, sample_rows))
+
+@mcp.tool()
+def query_sheet(
+    sheet: str, filter_query: str, columns: list[str] | None = None, max_rows: int = 100, cell_range: str | None = None, path: str | None = None
+) -> dict[str, Any]:
+    """Query sheet data using pandas expressions without returning the entire sheet into the LLM context.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        filter_query: Pandas query expression (e.g. "status == 'PAID' and amount > 500").
+        columns: Optional list of columns to return.
+        max_rows: Maximum rows to return (default 100).
+        cell_range: Optional range to restrict reading before querying.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: transform.query_sheet(path, sheet, filter_query, columns, max_rows, cell_range))
+
+@mcp.tool()
+def create_table(
+    sheet: str, cell_range: str, table_name: str, style_name: str = "TableStyleMedium9", show_filter: bool = True, show_row_stripes: bool = True, backup: bool | None = None, path: str | None = None
+) -> dict[str, Any]:
+    """Create a formal Excel Table (ListObject) on the specified range.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        cell_range: A1-style range (e.g. "A1:D10").
+        table_name: Unique table identifier across the workbook.
+        style_name: Table style name (e.g. "TableStyleMedium9").
+        show_filter: Whether to display auto-filter dropdown arrows.
+        show_row_stripes: Whether to apply alternating row shading.
+        backup: Whether to create a backup before modifying the workbook.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.create_table(path, sheet, cell_range, table_name, style_name, show_filter, show_row_stripes, backup=backup if backup is not None else writer.AUTO_BACKUP))
+
+@mcp.tool()
+def create_chart(
+    sheet: str, chart_type: str, data_range: str, categories_range: str | None = None, title: str = "Chart", target_cell: str = "E2", backup: bool | None = None, path: str | None = None
+) -> dict[str, Any]:
+    """Create a native Excel chart (bar, line, pie, scatter).
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        chart_type: One of "bar", "line", "pie", "scatter".
+        data_range: A1-style range holding the chart series values (e.g. "B1:B10").
+        categories_range: Optional A1-style range holding series category labels (e.g. "A2:A10").
+        title: Title string displayed on the chart.
+        target_cell: Cell coordinate where the top-left corner of the chart is placed.
+        backup: Whether to create a backup before modifying the workbook.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.create_chart(path, sheet, chart_type, data_range, categories_range, title, target_cell, backup=backup if backup is not None else writer.AUTO_BACKUP))
 
 
 def main() -> None:

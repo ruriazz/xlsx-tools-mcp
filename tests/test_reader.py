@@ -103,3 +103,45 @@ def test_get_cell_formula_value(tmp_path):
 def test_search_workbook_missing_sheet_raises(workbook_path):
     with pytest.raises(SheetNotFoundError):
         reader.search_workbook(workbook_path, "apple", sheet="NoSuchSheet")
+
+
+def test_read_sheet_format_records(workbook_path):
+    result = reader.read_sheet(workbook_path, "Data", format="records")
+    assert result["rows"] == [{"item": "apple", "qty": 10}, {"item": "banana", "qty": 5}]
+    assert result["row_count"] == 2
+
+
+def test_read_sheet_format_markdown(workbook_path):
+    result = reader.read_sheet(workbook_path, "Data", format="markdown")
+    lines = result["rows"].split("\n")
+    assert "| item | qty |" in lines[0]
+    assert "|---|---|" in lines[1]
+    assert "| apple | 10.0 |" in lines[2]
+
+
+def test_read_sheet_offset_row_array(workbook_path):
+    result = reader.read_sheet(workbook_path, "Data", offset_row=2)
+    assert result["rows"] == [["banana", 5]]
+
+
+def test_read_sheet_offset_row_records(workbook_path):
+    # Should use the original first row as headers, then skip 1 data row
+    result = reader.read_sheet(workbook_path, "Data", format="records", offset_row=1)
+    assert result["rows"] == [{"item": "banana", "qty": 5}]
+
+
+def test_read_sheet_format_markdown_pipe_escaped(tmp_path):
+    path = tmp_path / "pipe.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["col|a", "col|b"])
+    ws.append(["val|1", "val\n2"])
+    wb.save(path)
+
+    result = reader.read_sheet(str(path), "Data", format="markdown")
+    lines = result["rows"].split("\n")
+    assert r"col\|a" in lines[0]
+    assert r"val\|1" in lines[2]
+
+

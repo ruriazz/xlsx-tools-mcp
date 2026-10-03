@@ -138,3 +138,111 @@ def test_set_cell_style_applies_bold_and_fill(workbook_path):
     assert cell.font.bold is True
     assert cell.fill.start_color.rgb.endswith("FF0000")
     wb.close()
+
+
+def test_rename_sheet(workbook_path):
+    writer.rename_sheet(workbook_path, "Data", "NewData")
+    wb = openpyxl.load_workbook(workbook_path)
+    assert "NewData" in wb.sheetnames
+    assert "Data" not in wb.sheetnames
+    wb.close()
+
+
+def test_rename_sheet_invalid(workbook_path):
+    with pytest.raises(ValueError):
+        writer.rename_sheet(workbook_path, "Data", "Invalid[]Name")
+
+
+def test_copy_sheet(workbook_path):
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "test"}])
+    writer.copy_sheet(workbook_path, "Data", "DataCopy")
+    wb = openpyxl.load_workbook(workbook_path)
+    assert "DataCopy" in wb.sheetnames
+    assert wb["DataCopy"]["A1"].value == "test"
+    wb.close()
+
+
+def test_autofit_columns(workbook_path):
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "Very long text to autofit"}], recalculate=False)
+    writer.autofit_columns(workbook_path, "Data")
+    wb = openpyxl.load_workbook(workbook_path)
+    assert wb["Data"].column_dimensions["A"].width > 20
+    wb.close()
+
+
+def test_clear_range(workbook_path):
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "test"}, {"cell": "B1", "value": "keep"}])
+    writer.set_cell_style(workbook_path, "Data", "A1", {"bold": True})
+    
+    writer.clear_range(workbook_path, "Data", "A1:A1", clear_values=True, clear_styles=True)
+    wb = openpyxl.load_workbook(workbook_path)
+    assert wb["Data"]["A1"].value is None
+    assert wb["Data"]["A1"].font.bold is False
+    assert wb["Data"]["B1"].value == "keep"
+    wb.close()
+
+
+def test_clear_range_full_column_unbounded(workbook_path):
+    # "A:A" covers openpyxl 1 million rows, must safely bound to max_row without OOM/hang
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "top"}, {"cell": "A2", "value": "bottom"}], recalculate=False)
+    writer.clear_range(workbook_path, "Data", "A:A", clear_values=True)
+    wb = openpyxl.load_workbook(workbook_path)
+    assert wb["Data"]["A1"].value is None
+    assert wb["Data"]["A2"].value is None
+    wb.close()
+
+
+
+from xlsx_tools_mcp.errors import UnsafeFormulaError
+
+def test_formula_injection_guard(workbook_path):
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "=WEBSERVICE(\"http://evil.com\")"}])
+    
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "+WEBSERVICE(\"http://evil.com\")"}])
+
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "=indirect(\"A1\")"}])
+
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "=hyperlink(\"http://evil.com\")"}])
+
+    # Should not raise when allow_external_formulas=True
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "=WEBSERVICE(\"http://evil.com\")"}], allow_external_formulas=True, recalculate=False)
+    
+def test_auto_backup_creation_and_restore(workbook_path, monkeypatch, tmp_path):
+    import os
+    import glob
+    from pathlib import Path
+    
+    # write initial state
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "original"}], recalculate=False)
+    
+    # Set backup dir to a tmp dir to avoid clutter
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setattr("xlsx_tools_mcp.io.writer.BACKUP_DIR", str(backup_dir))
+    
+    # Write something with backup
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "mutated"}], recalculate=False, backup=True)
+    
+    backups = list(backup_dir.glob("*.bak"))
+    assert len(backups) == 1
+    
+    # Check that mutated is in the file
+    from xlsx_tools_mcp.io import reader
+    assert reader.read_sheet(workbook_path, "Data")["rows"][0][0] == "mutated"
+    
+    # Test extension validations in restore_backup
+    with pytest.raises(ValueError, match="non-backup file"):
+        writer.restore_backup(workbook_path, workbook_path)
+    with pytest.raises(ValueError, match="non-Excel file"):
+        writer.restore_backup(str(backups[0]), str(tmp_path / "notes.txt"))
+
+    # restore
+    writer.restore_backup(str(backups[0]), workbook_path)
+    
+    # Check that original is restored
+    assert reader.read_sheet(workbook_path, "Data")["rows"][0][0] == "original"
+
+

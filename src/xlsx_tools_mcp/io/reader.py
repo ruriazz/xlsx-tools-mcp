@@ -64,7 +64,14 @@ def _slice_range(data: list[list[Any]], cell_range: str) -> list[list[Any]]:
     return sliced
 
 
-def read_sheet(path: str, sheet: str, cell_range: str | None = None, max_rows: int | None = None) -> dict[str, Any]:
+def read_sheet(
+    path: str,
+    sheet: str,
+    cell_range: str | None = None,
+    max_rows: int | None = None,
+    offset_row: int = 0,
+    format: str = "array",
+) -> dict[str, Any]:
     """Read cell values as a 2D array, addressed absolutely from A1 (row/col 1 = A1).
 
     Primary path: python-calamine (fast, accurate type inference). Falls back to
@@ -74,6 +81,8 @@ def read_sheet(path: str, sheet: str, cell_range: str | None = None, max_rows: i
 
     `max_rows` optionally caps the number of rows returned, to bound response size
     for large sheets. `None` means no limit.
+    `offset_row` skips a number of data rows (useful for pagination).
+    `format` can be "array" (default 2D list), "records" (list of dicts), or "markdown" (table string).
     """
     try:
         wb = CalamineWorkbook.from_path(path)
@@ -89,15 +98,67 @@ def read_sheet(path: str, sheet: str, cell_range: str | None = None, max_rows: i
     if cell_range:
         data = _slice_range(data, cell_range)
 
+    if format not in ("array", "records", "markdown"):
+        raise ValueError(f"Unsupported format '{format}'. Supported formats: 'array', 'records', 'markdown'")
+
+    if offset_row < 0:
+        raise ValueError(f"offset_row must be non-negative, got {offset_row}")
+
+    column_count = max((len(row) for row in data), default=0)
+
+    def _escape_md(val: Any) -> str:
+        if val is None:
+            return ""
+        return str(val).replace("\n", " ").replace("|", "\\|")
+
+    if format in ("records", "markdown") and data:
+        if format == "markdown":
+            headers = [_escape_md(x) if (x is not None and str(x).strip() != "") else f"Column{i+1}" for i, x in enumerate(data[0])]
+        else:
+            raw_headers = data[0]
+            seen_headers: dict[str, int] = {}
+            headers = []
+            for i, x in enumerate(raw_headers):
+                clean_name = str(x).strip() if (x is not None and str(x).strip() != "") else f"Column{i+1}"
+                if clean_name in seen_headers:
+                    seen_headers[clean_name] += 1
+                    headers.append(f"{clean_name}_{seen_headers[clean_name]}")
+                else:
+                    seen_headers[clean_name] = 0
+                    headers.append(clean_name)
+        data_rows = data[1:]
+    else:
+        headers = []
+        data_rows = data
+
+    if offset_row > 0:
+        data_rows = data_rows[offset_row:]
+
     if max_rows is not None:
-        data = data[:max_rows]
+        data_rows = data_rows[:max_rows]
+
+    formatted_data: Any
+    if format == "records":
+        formatted_data = [dict(zip(headers, row)) for row in data_rows]
+    elif format == "markdown":
+        if not data:
+            formatted_data = ""
+        else:
+            lines = []
+            lines.append("| " + " | ".join(headers) + " |")
+            lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+            for row in data_rows:
+                lines.append("| " + " | ".join(_escape_md(x) for x in row) + " |")
+            formatted_data = "\n".join(lines)
+    else:
+        formatted_data = data_rows
 
     return {
         "sheet": sheet,
         "cell_range": cell_range,
-        "rows": data,
-        "row_count": len(data),
-        "column_count": max((len(row) for row in data), default=0),
+        "rows": formatted_data,
+        "row_count": len(data_rows),
+        "column_count": column_count,
     }
 
 
@@ -113,6 +174,11 @@ def get_cell(path: str, sheet: str, cell: str) -> dict[str, Any]:
     `data_only=True` load (for the cached computed value) is only done lazily when
     the cell actually holds a formula, since openpyxl can't yield both from one load.
     """
+    import re
+    if not isinstance(cell, str) or not re.match(r"^[A-Za-z]+[1-9][0-9]*$", cell.strip()):
+        raise ValueError(f"Invalid cell coordinate '{cell}'. Must be an A1-style reference like 'A1' or 'C5'.")
+    cell = cell.strip().upper()
+
     wb_formula = openpyxl.load_workbook(path, data_only=False)
     wb_value = None
     try:
@@ -188,3 +254,59 @@ def search_workbook(
     if limit is not None:
         matches = matches[:limit]
     return matches
+
+
+def profile_sheet(path: str, sheet: str, sample_rows: int = 3) -> dict[str, Any]:
+    """Profile sheet data: inferred types, null counts, min/max, sample values.
+
+    Args:
+        path: Path to the .xlsx file.
+        sheet: Sheet name.
+        sample_rows: Number of non-null sample values to return per column.
+
+    Returns:
+        Summary dict containing row_count and list of column profiles.
+    """
+    if sample_rows < 0:
+        raise ValueError(f"sample_rows must be non-negative, got {sample_rows}")
+
+    data = read_sheet(path, sheet)["rows"]
+    if not data:
+        return {"row_count": 0, "columns": []}
+        
+    header = data[0]
+    columns = [str(h) if h is not None else f"col_{i}" for i, h in enumerate(header)]
+    
+    rows = data[1:]
+    row_count = len(rows)
+    
+    profiles = []
+    for c_idx, col_name in enumerate(columns):
+        col_values = [row[c_idx] for row in rows if c_idx < len(row)]
+        
+        non_null_values = [v for v in col_values if v is not None and v != ""]
+        null_count = row_count - len(non_null_values)
+        
+        types = set(type(v).__name__ for v in non_null_values)
+        inferred_type = "mixed" if len(types) > 1 else (list(types)[0] if types else "empty")
+        
+        numeric_values = [v for v in non_null_values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        min_val = min(numeric_values) if numeric_values else None
+        max_val = max(numeric_values) if numeric_values else None
+        
+        sample = non_null_values[:sample_rows]
+        
+        profiles.append({
+            "column": col_name,
+            "type": inferred_type,
+            "null_count": null_count,
+            "min": min_val,
+            "max": max_val,
+            "sample": sample
+        })
+        
+    return {
+        "row_count": row_count,
+        "columns": profiles
+    }
+
