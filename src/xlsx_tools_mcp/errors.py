@@ -24,3 +24,12 @@ class UnsafeFormulaError(XlsxMcpError):
 
 class FileInUseError(XlsxMcpError):
     """Raised when a file cannot be saved/overwritten because it is locked by another process."""
+
+
+class WorkbookNotFoundError(XlsxMcpError):
+    """Raised when a requested workbook file does not exist on disk."""
+
+
+class InvalidWorkbookError(XlsxMcpError):
+    """Raised when a file exists but is not a valid or readable Excel workbook."""
+

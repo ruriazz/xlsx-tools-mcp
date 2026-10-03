@@ -56,6 +56,8 @@ def _run(fn: Callable[[], T]) -> T:
         raise ValueError(str(exc)) from exc
     except FileExistsError as exc:
         raise ValueError(str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise ValueError(str(exc)) from exc
     except PermissionError as exc:
         winerror = getattr(exc, "winerror", None)
         if winerror in (32, 33):

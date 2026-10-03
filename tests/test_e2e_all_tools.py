@@ -297,3 +297,39 @@ def test_cross_platform_path_confinement_case_insensitivity(tmp_path, monkeypatc
     upper_path = str(wb_file).upper() if os.name == "nt" else str(wb_file)
     res = server.read_sheet("Sheet1", path=upper_path)
     assert "rows" in res
+
+
+def test_e2e_missing_and_corrupt_workbook_recovery(tmp_path):
+    """End-to-end simulation of agent encountering missing/corrupt files and recovering."""
+    missing_file = tmp_path / "UncreatedReport.xlsx"
+    missing_path = str(missing_file)
+
+    # 1. Agent attempts to read before creation -> clean actionable error
+    with pytest.raises(ValueError, match="Workbook not found"):
+        server.read_sheet("Sheet1", path=missing_path)
+
+    # 2. Agent attempts to write before creation -> advises create_workbook
+    with pytest.raises(ValueError, match="Workbook not found.*Use create_workbook"):
+        server.write_cells("Sheet1", [{"cell": "A1", "value": "Test"}], path=missing_path)
+
+    # 3. Agent follows guidance and creates workbook
+    cw_res = server.create_workbook(missing_path, ["Sheet1"])
+    assert cw_res["saved"] is True
+
+    # 4. Agent now writes and reads successfully
+    wc_res = server.write_cells("Sheet1", [{"cell": "A1", "value": "NowItWorks"}], path=missing_path)
+    assert wc_res["saved"] is True
+    cell_res = server.get_cell("Sheet1", "A1", path=missing_path)
+    assert cell_res["value"] == "NowItWorks"
+
+    # 5. Agent encounters a 0-byte / non-zip file -> clean InvalidWorkbook error
+    corrupt_file = tmp_path / "CorruptFile.xlsx"
+    corrupt_file.write_text("corrupted content not xlsx")
+    corrupt_path = str(corrupt_file)
+
+    with pytest.raises(ValueError, match="not a valid"):
+        server.read_sheet("Sheet1", path=corrupt_path)
+
+    with pytest.raises(ValueError, match="not a valid"):
+        server.get_cell("Sheet1", "A1", path=corrupt_path)
+

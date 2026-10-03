@@ -147,3 +147,18 @@ def test_server_tools_enforce_allowed_dirs(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="Access denied"):
         server.restore_backup(str(tmp_path / "outside" / "a.bak"), str(tmp_path / "outside" / "target.xlsx"))
 
+
+def test_resolve_path_windows_case_insensitive_configured_files(monkeypatch):
+    import ntpath
+    monkeypatch.setattr("xlsx_tools_mcp.settings.sys.platform", "win32")
+    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr("os.path.normcase", ntpath.normcase)
+    monkeypatch.setattr("xlsx_tools_mcp.settings.CONFIGURED_FILES", {
+        "Monthly_Report.xlsx": r"C:\Data\Monthly_Report.xlsx",
+        "budget": r"C:\Data\Budget.xlsx",
+    })
+
+    assert resolve_path("monthly_report.xlsx") == r"C:\Data\Monthly_Report.xlsx"
+    assert resolve_path("BUDGET") == r"C:\Data\Budget.xlsx"
+
+

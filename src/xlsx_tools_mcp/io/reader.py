@@ -1,30 +1,51 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
+import re
 from typing import Any
+import zipfile
 
 import openpyxl
 from openpyxl.utils import get_column_letter, range_boundaries
+from openpyxl.utils.exceptions import InvalidFileException
 from python_calamine import CalamineWorkbook
 
-from ..errors import SheetNotFoundError
+from ..errors import InvalidWorkbookError, SheetNotFoundError, WorkbookNotFoundError
 
 logger = logging.getLogger(__name__)
 
 
 def list_sheets(path: str) -> list[dict[str, Any]]:
     """List sheet names with their approximate used-range size (calamine, fast)."""
-    wb = CalamineWorkbook.from_path(path)
-    return [
-        {"name": name, "rows": sh.height, "columns": sh.width}
-        for name in wb.sheet_names
-        for sh in (wb.get_sheet_by_name(name),)
-    ]
+    p = Path(path)
+    if not p.is_file():
+        raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
+    try:
+        wb = CalamineWorkbook.from_path(path)
+        return [
+            {"name": name, "rows": sh.height, "columns": sh.width}
+            for name in wb.sheet_names
+            for sh in (wb.get_sheet_by_name(name),)
+        ]
+    except PermissionError:
+        raise
+    except Exception as exc:
+        raise InvalidWorkbookError(f"File '{path}' is not a valid or readable Excel workbook: {exc}") from exc
 
 
 def workbook_info(path: str) -> dict[str, Any]:
     """Workbook-level metadata that calamine doesn't expose: exact dims, defined names."""
-    wb = openpyxl.load_workbook(path, data_only=False)
+    p = Path(path)
+    if not p.is_file():
+        raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
+    try:
+        wb = openpyxl.load_workbook(path, data_only=False)
+    except PermissionError:
+        raise
+    except (zipfile.BadZipFile, InvalidFileException) as exc:
+        raise InvalidWorkbookError(f"File '{path}' is not a valid Excel workbook: {exc}") from exc
     try:
         sheets = [
             {
@@ -45,8 +66,14 @@ def workbook_info(path: str) -> dict[str, Any]:
         wb.close()
 
 
+
 def _read_sheet_openpyxl_values(path: str, sheet: str) -> list[list[Any]]:
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except PermissionError:
+        raise
+    except (zipfile.BadZipFile, InvalidFileException) as exc:
+        raise InvalidWorkbookError(f"File '{path}' is not a valid Excel workbook: {exc}") from exc
     try:
         if sheet not in wb.sheetnames:
             raise SheetNotFoundError(f"Sheet '{sheet}' not found. Available: {wb.sheetnames}")
@@ -84,16 +111,20 @@ def read_sheet(
     `offset_row` skips a number of data rows (useful for pagination).
     `format` can be "array" (default 2D list), "records" (list of dicts), or "markdown" (table string).
     """
+    p = Path(path)
+    if not p.is_file():
+        raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
     try:
         wb = CalamineWorkbook.from_path(path)
         if sheet not in wb.sheet_names:
             raise SheetNotFoundError(f"Sheet '{sheet}' not found. Available: {wb.sheet_names}")
         data = wb.get_sheet_by_name(sheet).to_python(skip_empty_area=False)
-    except SheetNotFoundError:
+    except (SheetNotFoundError, PermissionError):
         raise
     except Exception:
         logger.debug("calamine failed to read %s, falling back to openpyxl", path, exc_info=True)
         data = _read_sheet_openpyxl_values(path, sheet)
+
 
     if cell_range:
         data = _slice_range(data, cell_range)
@@ -174,12 +205,19 @@ def get_cell(path: str, sheet: str, cell: str) -> dict[str, Any]:
     `data_only=True` load (for the cached computed value) is only done lazily when
     the cell actually holds a formula, since openpyxl can't yield both from one load.
     """
-    import re
+    p = Path(path)
+    if not p.is_file():
+        raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
     if not isinstance(cell, str) or not re.match(r"^[A-Za-z]+[1-9][0-9]*$", cell.strip()):
         raise ValueError(f"Invalid cell coordinate '{cell}'. Must be an A1-style reference like 'A1' or 'C5'.")
     cell = cell.strip().upper()
 
-    wb_formula = openpyxl.load_workbook(path, data_only=False)
+    try:
+        wb_formula = openpyxl.load_workbook(path, data_only=False)
+    except PermissionError:
+        raise
+    except (zipfile.BadZipFile, InvalidFileException) as exc:
+        raise InvalidWorkbookError(f"File '{path}' is not a valid Excel workbook: {exc}") from exc
     wb_value = None
     try:
         if sheet not in wb_formula.sheetnames:
@@ -190,7 +228,12 @@ def get_cell(path: str, sheet: str, cell: str) -> dict[str, Any]:
         is_formula = isinstance(c_formula.value, str) and c_formula.value.startswith("=")
 
         if is_formula:
-            wb_value = openpyxl.load_workbook(path, data_only=True)
+            try:
+                wb_value = openpyxl.load_workbook(path, data_only=True)
+            except PermissionError:
+                raise
+            except (zipfile.BadZipFile, InvalidFileException) as exc:
+                raise InvalidWorkbookError(f"File '{path}' is not a valid Excel workbook: {exc}") from exc
             if sheet not in wb_value.sheetnames:
                 raise SheetNotFoundError(f"Sheet '{sheet}' not found. Available: {wb_value.sheetnames}")
             value = wb_value[sheet][cell].value
@@ -240,7 +283,16 @@ def search_workbook(
 
     `limit` optionally caps the number of matches returned; `None` means no limit.
     """
-    wb = CalamineWorkbook.from_path(path)
+    p = Path(path)
+    if not p.is_file():
+        raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
+    try:
+        wb = CalamineWorkbook.from_path(path)
+    except PermissionError:
+        raise
+    except Exception as exc:
+        raise InvalidWorkbookError(f"File '{path}' is not a valid or readable Excel workbook: {exc}") from exc
+
     target_sheets = [sheet] if sheet else list(wb.sheet_names)
     needle = query if match_case else query.lower()
 

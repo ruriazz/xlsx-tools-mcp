@@ -145,3 +145,50 @@ def test_read_sheet_format_markdown_pipe_escaped(tmp_path):
     assert r"val\|1" in lines[2]
 
 
+def test_read_non_existent_file_raises_workbook_not_found(tmp_path):
+    from xlsx_tools_mcp.errors import WorkbookNotFoundError
+    missing = str(tmp_path / "missing.xlsx")
+    with pytest.raises(WorkbookNotFoundError):
+        reader.read_sheet(missing, "Sheet1")
+    with pytest.raises(WorkbookNotFoundError):
+        reader.list_sheets(missing)
+    with pytest.raises(WorkbookNotFoundError):
+        reader.workbook_info(missing)
+    with pytest.raises(WorkbookNotFoundError):
+        reader.get_cell(missing, "Sheet1", "A1")
+    with pytest.raises(WorkbookNotFoundError):
+        reader.search_workbook(missing, "query")
+
+
+def test_corrupted_file_raises_invalid_workbook_error(tmp_path):
+    from xlsx_tools_mcp.errors import InvalidWorkbookError
+    corrupt = tmp_path / "corrupt.xlsx"
+    corrupt.write_text("not a real excel file")
+    with pytest.raises(InvalidWorkbookError):
+        reader.read_sheet(str(corrupt), "Sheet1")
+    with pytest.raises(InvalidWorkbookError):
+        reader.list_sheets(str(corrupt))
+    with pytest.raises(InvalidWorkbookError):
+        reader.workbook_info(str(corrupt))
+
+
+def test_reader_permission_error_not_masked(monkeypatch, tmp_path):
+    p = tmp_path / "test.xlsx"
+    wb = openpyxl.Workbook()
+    wb.save(p)
+    wb.close()
+
+    def mock_load(*args, **kwargs):
+        exc = PermissionError("File locked")
+        exc.winerror = 32
+        raise exc
+
+    monkeypatch.setattr("openpyxl.load_workbook", mock_load)
+    with pytest.raises(PermissionError):
+        reader.workbook_info(str(p))
+    with pytest.raises(PermissionError):
+        reader.get_cell(str(p), "Sheet", "A1")
+
+
+
+
