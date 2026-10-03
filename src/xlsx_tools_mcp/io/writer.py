@@ -216,6 +216,10 @@ def delete_sheet(path: str, sheet: str, backup: bool = AUTO_BACKUP) -> dict[str,
 def insert_rows(
     path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
+    if start_row < 1:
+        raise ValueError(f"start_row must be >= 1, got {start_row}")
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
     wb = _load(path)
     _ws(wb, sheet).insert_rows(start_row, count)
     return _finalize(wb, path, recalc=recalculate, backup=backup)
@@ -224,6 +228,10 @@ def insert_rows(
 def delete_rows(
     path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
+    if start_row < 1:
+        raise ValueError(f"start_row must be >= 1, got {start_row}")
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
     wb = _load(path)
     _ws(wb, sheet).delete_rows(start_row, count)
     return _finalize(wb, path, recalc=recalculate, backup=backup)
@@ -232,6 +240,10 @@ def delete_rows(
 def insert_columns(
     path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
+    if start_column < 1:
+        raise ValueError(f"start_column must be >= 1, got {start_column}")
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
     wb = _load(path)
     _ws(wb, sheet).insert_cols(start_column, count)
     return _finalize(wb, path, recalc=recalculate, backup=backup)
@@ -240,6 +252,10 @@ def insert_columns(
 def delete_columns(
     path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
+    if start_column < 1:
+        raise ValueError(f"start_column must be >= 1, got {start_column}")
+    if count < 1:
+        raise ValueError(f"count must be >= 1, got {count}")
     wb = _load(path)
     _ws(wb, sheet).delete_cols(start_column, count)
     return _finalize(wb, path, recalc=recalculate, backup=backup)
@@ -322,6 +338,9 @@ def rename_sheet(path: str, old_name: str, new_name: str, backup: bool = AUTO_BA
     wb = _load(path)
     ws = _ws(wb, old_name)
 
+    if old_name == new_name:
+        return _finalize(wb, path, recalc=False, backup=backup)
+
     if new_name in wb.sheetnames:
         raise ValueError(f"Sheet '{new_name}' already exists")
     _validate_sheet_name(new_name)
@@ -346,6 +365,13 @@ def copy_sheet(path: str, source_sheet: str, target_sheet: str, backup: bool = A
 def autofit_columns(
     path: str, sheet: str, min_width: int = 10, max_width: int = 50, padding: int = 3, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
+    if min_width < 0:
+        raise ValueError(f"min_width must be non-negative, got {min_width}")
+    if max_width < 0:
+        raise ValueError(f"max_width must be non-negative, got {max_width}")
+    if min_width > max_width:
+        raise ValueError(f"min_width ({min_width}) cannot be greater than max_width ({max_width})")
+
     wb = _load(path)
     ws = _ws(wb, sheet)
 
@@ -398,6 +424,21 @@ def clear_range(
 
 
 
+_TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+_CELL_COORD_PATTERN = re.compile(r"^[A-Za-z]+[1-9][0-9]*$")
+_R1C1_PATTERN = re.compile(r"^R[1-9][0-9]*C[1-9][0-9]*$", re.IGNORECASE)
+
+
+def _validate_table_name(name: str) -> None:
+    if not name or len(name) > 255 or not _TABLE_NAME_PATTERN.match(name):
+        raise ValueError(
+            f"Invalid table name '{name}'. Table names must start with a letter or underscore, "
+            "contain only alphanumeric characters, underscores, or periods, and cannot contain spaces."
+        )
+    if _CELL_COORD_PATTERN.match(name) or _R1C1_PATTERN.match(name):
+        raise ValueError(f"Invalid table name '{name}'. Table names cannot be cell coordinates.")
+
+
 def create_table(
     path: str,
     sheet: str,
@@ -425,18 +466,21 @@ def create_table(
     """
     from openpyxl.worksheet.table import Table, TableStyleInfo
     from openpyxl.worksheet.filters import AutoFilter
-    
+
+    _validate_table_name(table_name)
     wb = _load(path)
     ws = _ws(wb, sheet)
-    
+
     for other_ws in wb.worksheets:
         if table_name in other_ws.tables:
             raise ValueError(f"Table name '{table_name}' already exists in sheet '{other_ws.title}'")
-            
+
     min_col, min_row, max_col, max_row = range_boundaries(cell_range)
     if min_col is None or min_row is None or max_col is None or max_row is None:
         raise ValueError(f"Invalid cell_range: {cell_range}")
-        
+    if min_row >= max_row:
+        raise ValueError(f"Table range '{cell_range}' must span at least 2 rows (1 header row and at least 1 data row)")
+
     tab = Table(displayName=table_name, ref=cell_range)
     style = TableStyleInfo(
         name=style_name,
@@ -446,12 +490,12 @@ def create_table(
         showColumnStripes=False
     )
     tab.tableStyleInfo = style
-    
+
     if not show_filter:
         tab.autoFilter = None
     else:
         tab.autoFilter = AutoFilter(ref=cell_range)
-        
+
     ws.add_table(tab)
     return _finalize(wb, path, recalc=False, backup=backup)
 
@@ -482,38 +526,42 @@ def create_chart(
         Standardized write result dict.
     """
     from openpyxl.chart import BarChart, LineChart, PieChart, ScatterChart, Reference
-    
+
+    if not isinstance(target_cell, str) or not _CELL_COORD_PATTERN.match(target_cell.strip()):
+        raise ValueError(f"Invalid target_cell coordinate: '{target_cell}'. Must be an A1-style reference like 'E2'.")
+    target_cell = target_cell.strip().upper()
+
     wb = _load(path)
     ws = _ws(wb, sheet)
-    
+
     chart_map = {
         "bar": BarChart,
         "line": LineChart,
         "pie": PieChart,
         "scatter": ScatterChart
     }
-    
+
     if chart_type.lower() not in chart_map:
         raise ValueError(f"Unsupported chart type: {chart_type}. Supported: bar, line, pie, scatter.")
-        
+
     chart = chart_map[chart_type.lower()]()
     chart.title = title
-    
+
     d_min_col, d_min_row, d_max_col, d_max_row = range_boundaries(data_range)
     if any(v is None for v in (d_min_col, d_min_row, d_max_col, d_max_row)):
         raise ValueError(f"Invalid data_range: {data_range}")
-        
+
     data = Reference(ws, min_col=d_min_col, min_row=d_min_row, max_col=d_max_col, max_row=d_max_row)
     chart.add_data(data, titles_from_data=True)
-    
+
     if categories_range:
         c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
         if any(v is None for v in (c_min_col, c_min_row, c_max_col, c_max_row)):
             raise ValueError(f"Invalid categories_range: {categories_range}")
         cats = Reference(ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
         chart.set_categories(cats)
-        
+
     ws.add_chart(chart, target_cell)
-    
+
     return _finalize(wb, path, recalc=False, backup=backup)
 

@@ -66,12 +66,24 @@ def query_sheet(
     Returns:
         Dict containing columns, records, total row_count, and whether results were limited.
     """
+    if max_rows < 0:
+        raise ValueError(f"max_rows must be non-negative, got {max_rows}")
+
     rows = reader.read_sheet(path, sheet, cell_range=cell_range)["rows"]
     if not rows:
         return {"columns": [], "records": [], "row_count": 0, "limited": False}
 
     header, *body = rows
-    df_columns = [str(h) if h is not None else f"col_{i}" for i, h in enumerate(header)]
+    seen_cols: dict[str, int] = {}
+    df_columns: list[str] = []
+    for i, h in enumerate(header):
+        name = str(h).strip() if (h is not None and str(h).strip() != "") else f"col_{i}"
+        if name in seen_cols:
+            seen_cols[name] += 1
+            df_columns.append(f"{name}_{seen_cols[name]}")
+        else:
+            seen_cols[name] = 0
+            df_columns.append(name)
     df = pd.DataFrame(body, columns=df_columns)
     
     try:

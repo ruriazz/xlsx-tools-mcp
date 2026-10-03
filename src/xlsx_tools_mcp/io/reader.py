@@ -98,6 +98,12 @@ def read_sheet(
     if cell_range:
         data = _slice_range(data, cell_range)
 
+    if format not in ("array", "records", "markdown"):
+        raise ValueError(f"Unsupported format '{format}'. Supported formats: 'array', 'records', 'markdown'")
+
+    if offset_row < 0:
+        raise ValueError(f"offset_row must be non-negative, got {offset_row}")
+
     column_count = max((len(row) for row in data), default=0)
 
     def _escape_md(val: Any) -> str:
@@ -107,9 +113,19 @@ def read_sheet(
 
     if format in ("records", "markdown") and data:
         if format == "markdown":
-            headers = [_escape_md(x) if x is not None else f"Column{i+1}" for i, x in enumerate(data[0])]
+            headers = [_escape_md(x) if (x is not None and str(x).strip() != "") else f"Column{i+1}" for i, x in enumerate(data[0])]
         else:
-            headers = [str(x) if x is not None else f"Column{i+1}" for i, x in enumerate(data[0])]
+            raw_headers = data[0]
+            seen_headers: dict[str, int] = {}
+            headers = []
+            for i, x in enumerate(raw_headers):
+                clean_name = str(x).strip() if (x is not None and str(x).strip() != "") else f"Column{i+1}"
+                if clean_name in seen_headers:
+                    seen_headers[clean_name] += 1
+                    headers.append(f"{clean_name}_{seen_headers[clean_name]}")
+                else:
+                    seen_headers[clean_name] = 0
+                    headers.append(clean_name)
         data_rows = data[1:]
     else:
         headers = []
@@ -158,6 +174,11 @@ def get_cell(path: str, sheet: str, cell: str) -> dict[str, Any]:
     `data_only=True` load (for the cached computed value) is only done lazily when
     the cell actually holds a formula, since openpyxl can't yield both from one load.
     """
+    import re
+    if not isinstance(cell, str) or not re.match(r"^[A-Za-z]+[1-9][0-9]*$", cell.strip()):
+        raise ValueError(f"Invalid cell coordinate '{cell}'. Must be an A1-style reference like 'A1' or 'C5'.")
+    cell = cell.strip().upper()
+
     wb_formula = openpyxl.load_workbook(path, data_only=False)
     wb_value = None
     try:
@@ -246,6 +267,9 @@ def profile_sheet(path: str, sheet: str, sample_rows: int = 3) -> dict[str, Any]
     Returns:
         Summary dict containing row_count and list of column profiles.
     """
+    if sample_rows < 0:
+        raise ValueError(f"sample_rows must be non-negative, got {sample_rows}")
+
     data = read_sheet(path, sheet)["rows"]
     if not data:
         return {"row_count": 0, "columns": []}
