@@ -328,13 +328,60 @@ If a formula this touches produced an error, `errors_found` would look like:
 }
 ```
 
+### Example payload — `query_sheet`
+
+```json
+{
+  "sheet": "Sales",
+  "filter_query": "Revenue > 500 and Status == 'PAID'",
+  "columns": ["Customer", "Revenue"],
+  "max_rows": 10
+}
+```
+
+### Example payload — `create_table` & `create_chart`
+
+```json
+{
+  "sheet": "Summary",
+  "cell_range": "A1:D10",
+  "table_name": "SalesTable",
+  "style_name": "TableStyleMedium9"
+}
+```
+
+```json
+{
+  "sheet": "Summary",
+  "chart_type": "bar",
+  "data_range": "B1:B10",
+  "categories_range": "A2:A10",
+  "title": "Monthly Revenue",
+  "target_cell": "F2"
+}
+```
+
+---
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `XLSX_MCP_FILES` | *empty* | Comma-separated `alias=path` or `path` to preload at startup. |
+| `XLSX_MCP_ALLOWED_DIRS` | *empty* | Comma-separated directories to confine file access (paths outside raise `AccessDeniedError`). |
+| `XLSX_MCP_AUTO_BACKUP` | `true` | Automatically create a `.bak` copy before modifying a workbook. |
+| `XLSX_MCP_BACKUP_DIR` | *empty* | Custom directory for backup files (defaults to beside the target file). |
+| `XLSX_MCP_RECALC_TIMEOUT` | `60` | Timeout in seconds for headless LibreOffice formula recalculation. |
+| `XLSX_MCP_LOCK_TIMEOUT` | `10` | Timeout in seconds to acquire per-file lock before failing. |
+
 ---
 
 ## Security & concurrency
 
 - **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`.
-- **Auto-backup** — Write tools will automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `XLSX_MCP_BACKUP_DIR` to save backups to a specific folder instead of alongside the target file.
-- **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, or `REGISTER` by default to prevent data exfiltration or malicious links. Pass `allow_external_formulas=True` to bypass this check.
+- **Auto-backup & restore** — Write tools will automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `XLSX_MCP_BACKUP_DIR` to save backups to a specific folder. Use `restore_backup` to atomically revert changes.
+- **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, `REGISTER`, or DDE commands (`|`) by default to prevent data exfiltration or command execution. Pass `allow_external_formulas=True` to bypass this check.
+- **AST safe query validation** — `query_sheet` uses an AST parser to strictly allow only comparisons, boolean logic, and safe operators, blocking `@` variable lookups, code execution calls, and private dunder attributes.
 - **XML-bomb protection** — `defusedxml` is an automatic dependency of this package. openpyxl auto-detects it and uses its hardened XML parser, so a malicious `.xlsx` (a zip of XML) can't trigger entity-expansion resource exhaustion. No configuration needed.
 - **Per-file locking** — every read/write acquires a sibling `<path>.lock` file (via `filelock`). Concurrent tool calls or other processes touching the same workbook are serialized so writes never interleave and corrupt the file.
 - **Recalc timeout** — `XLSX_MCP_RECALC_TIMEOUT` (seconds, default `60`) caps how long the LibreOffice recalculation pass may run.
