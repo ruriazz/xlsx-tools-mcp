@@ -150,8 +150,7 @@ def test_server_tools_enforce_allowed_dirs(monkeypatch, tmp_path):
 
 def test_resolve_path_windows_case_insensitive_configured_files(monkeypatch):
     import ntpath
-    monkeypatch.setattr("xlsx_tools_mcp.settings.sys.platform", "win32")
-    monkeypatch.setattr("os.name", "nt")
+    monkeypatch.setattr("xlsx_tools_mcp.settings.IS_WINDOWS", True)
     monkeypatch.setattr("os.path.normcase", ntpath.normcase)
     monkeypatch.setattr("xlsx_tools_mcp.settings.CONFIGURED_FILES", {
         "Monthly_Report.xlsx": r"C:\Data\Monthly_Report.xlsx",
