@@ -467,3 +467,103 @@ def test_row_and_column_bounds(clean_wb):
     # delete_columns bounds
     with pytest.raises(ValueError, match="start_column must be >= 1"):
         server.delete_columns("Main", start_column=0, path=clean_wb)
+
+
+# ── 5. Audit Hardening Verification ──────────────────────────────────────────
+
+
+def test_query_sheet_rce_prevention(clean_wb):
+    server.append_rows("Data", [
+        ["Col1", "Col2"],
+        [10, 20]
+    ], path=clean_wb)
+
+    # RCE payloads must be strictly blocked
+    malicious_queries = [
+        "@__builtins__.__import__('os').system('calc')",
+        "__import__('os').system('calc')",
+        "eval('1+1')",
+        "os.system('calc')",
+        "__class__.__base__",
+        "@variable_ref",
+    ]
+    for bad_query in malicious_queries:
+        with pytest.raises(ValueError, match="Invalid query"):
+            server.query_sheet("Data", bad_query, path=clean_wb)
+
+
+def test_dde_formula_injection_prevention(clean_wb):
+    dde_payloads = [
+        "=cmd|'/C calc'!A0",
+        "+cmd|'/C calc'!A0",
+        "-powershell|'/C calc'!A0",
+        "@cmd|'/C calc'!A0",
+    ]
+    for dde in dde_payloads:
+        with pytest.raises(ValueError, match="unsafe DDE command execution syntax"):
+            server.write_cells("Main", [{"cell": "A1", "formula": dde}], path=clean_wb)
+
+
+def test_table_header_validation(clean_wb):
+    # Empty header cell in table range
+    server.append_rows("Data", [
+        ["Col1", None, "Col3"],
+        [1, 2, 3],
+    ], path=clean_wb)
+    with pytest.raises(ValueError, match="Table header cell.*is empty"):
+        server.create_table("Data", "A1:C2", "EmptyHeaderTable", path=clean_wb)
+
+    # Duplicate header in table range
+    server.append_rows("Main", [
+        ["ColA", "ColA"],
+        [1, 2],
+    ], path=clean_wb)
+    with pytest.raises(ValueError, match="Duplicate table column header"):
+        server.create_table("Main", "A1:B2", "DuplicateHeaderTable", path=clean_wb)
+
+
+def test_backup_dir_in_allowed_dirs(tmp_path):
+    allowed_dir = tmp_path / "app_data"
+    backup_dir = tmp_path / "app_backups"
+    allowed_dir.mkdir()
+    backup_dir.mkdir()
+
+    wb_path = str(allowed_dir / "doc.xlsx")
+    os.environ["XLSX_MCP_ALLOWED_DIRS"] = str(allowed_dir)
+    os.environ["XLSX_MCP_BACKUP_DIR"] = str(backup_dir)
+
+    # Re-evaluate settings
+    settings.ALLOWED_DIRS = settings._parse_allowed_dirs(str(allowed_dir))
+    settings.BACKUP_DIR = str(backup_dir.resolve())
+    if settings.BACKUP_DIR and settings.ALLOWED_DIRS and settings.BACKUP_DIR not in settings.ALLOWED_DIRS:
+        settings.ALLOWED_DIRS.append(settings.BACKUP_DIR)
+
+    try:
+        server.create_workbook(wb_path, ["S1"])
+        server.write_cells("S1", [{"cell": "A1", "value": "Initial"}], backup=False, path=wb_path)
+
+        # Mutate with backup=True -> backup captures 'Initial'
+        server.write_cells("S1", [{"cell": "A1", "value": "Changed"}], backup=True, path=wb_path)
+
+        # Check backup created in custom BACKUP_DIR
+        import glob
+        backups = glob.glob(str(backup_dir / "*.bak"))
+        assert len(backups) == 1
+        backup_file = backups[0]
+
+        # Verify currently changed
+        curr_res = server.read_sheet("S1", path=wb_path)
+        assert curr_res["rows"][0][0] == "Changed"
+
+        # Restore from backup_dir must succeed and NOT be blocked by ALLOWED_DIRS
+        res = server.restore_backup(backup_file, wb_path)
+        assert res["restored"] is True
+
+        read_res = server.read_sheet("S1", path=wb_path)
+        assert read_res["rows"][0][0] == "Initial"
+    finally:
+        os.environ.pop("XLSX_MCP_ALLOWED_DIRS", None)
+        os.environ.pop("XLSX_MCP_BACKUP_DIR", None)
+        settings.ALLOWED_DIRS = []
+        settings.BACKUP_DIR = ""
+

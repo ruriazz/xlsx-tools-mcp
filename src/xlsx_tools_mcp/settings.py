@@ -21,6 +21,8 @@ def _parse_allowed_dirs(raw: str) -> list[str]:
     return dirs
 
 ALLOWED_DIRS = _parse_allowed_dirs(os.environ.get("XLSX_MCP_ALLOWED_DIRS", ""))
+if BACKUP_DIR and ALLOWED_DIRS and BACKUP_DIR not in ALLOWED_DIRS:
+    ALLOWED_DIRS.append(BACKUP_DIR)
 
 def _parse_configured_files(raw: str) -> dict[str, str]:
     """Parse `name=path` or bare `path` entries (comma-separated) into alias -> absolute path."""

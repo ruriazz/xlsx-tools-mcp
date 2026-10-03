@@ -10,7 +10,7 @@ An MCP server for reading and writing Excel (.xlsx) files with high accuracy, wh
 
 ## Overview
 
-`xlsx-tools-mcp` exposes 25 Model Context Protocol (MCP) tools that give an LLM agent accurate, structure-preserving read **and** write access to Excel `.xlsx` files. It runs as a standard stdio MCP server: you install it and register it with an MCP client (Claude Code, OpenCode, etc.), and the client's agent can list sheets, read cell ranges, search values, aggregate data, write cells/formulas, manage sheets/rows/columns, apply styles, and force formula recalculation.
+`xlsx-tools-mcp` exposes 29 Model Context Protocol (MCP) tools that give an LLM agent accurate, structure-preserving read **and** write access to Excel `.xlsx` files. It runs as a standard stdio MCP server: you install it and register it with an MCP client (Claude Code, OpenCode, etc.), and the client's agent can list sheets, read cell ranges, search values, aggregate data, write cells/formulas, manage sheets/rows/columns, apply styles, and force formula recalculation.
 
 It is built around the principle that editing an existing workbook should **not** destroy what it doesn't touch.
 
@@ -19,11 +19,13 @@ It is built around the principle that editing an existing workbook should **not*
 - **Structure-preserving writes via openpyxl** — writes load the existing workbook and save it back, preserving styles, merged cells, comments, and any aspect the edit doesn't touch.
 - **Never-stale formula results via LibreOffice recalculation** — openpyxl writes formula *strings* but never evaluates them. After every value/formula write the server runs a headless LibreOffice pass to recompute real results, then returns `errors_found` — any Excel error values (`#REF!`, `#DIV/0!`, `#N/A`, …) produced by the recalculation.
 - **Fast reads via python-calamine** — a Rust-backed parser for accurate, fast type inference, with an automatic openpyxl fallback when you need formulas/styles/comments or when calamine can't parse the file.
-- **pandas-based grouping/aggregation** — `aggregate_sheet` groups and aggregates on top of the normal read path, so merged cells and styling in the source range are preserved before flattening.
+- **pandas-based grouping/aggregation & querying** — `aggregate_sheet` and `query_sheet` perform operations without destroying source structure, equipped with AST expression validation to block code injection.
+- **Native Excel objects** — create formal Excel Tables (`create_table`) with autofilter and styles, and native charts (`create_chart` for bar, line, pie, scatter).
+- **Sheet lifecycle & formatting** — rename sheets (`rename_sheet`), duplicate sheets with styles intact (`copy_sheet`), clear ranges (`clear_range`), and auto-fit column widths (`autofit_columns`).
 - **Per-file locking** — concurrent tool calls (or other processes) touching the same workbook are serialized via a sibling `<path>.lock` file (filelock), so writes never interleave and corrupt the file.
 - **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`.
-- **Auto-backup** — Write tools will automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `XLSX_MCP_BACKUP_DIR` to save backups to a specific folder instead of alongside the target file.
-- **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, or `REGISTER` by default to prevent data exfiltration or malicious links. Pass `allow_external_formulas=True` to bypass this check.
+- **Auto-backup & restore** — Write tools automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `restore_backup` to atomically revert changes.
+- **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, `REGISTER`, or DDE commands (`|`) by default to prevent data exfiltration or malicious links. Pass `allow_external_formulas=True` to bypass this check.
 - **XML-bomb protection** — the `defusedxml` package is an automatic dependency; openpyxl detects it and uses its hardened XML parser, so hostile `xlsx` XML can't expand into resource exhaustion.
 - **Preload files at startup** — set `XLSX_MCP_FILES` to preload one or more workbooks; tools can then be called with `path` omitted or with a short alias instead of a full filesystem path.
 
@@ -41,7 +43,7 @@ Live via [pypistats.org](https://pypistats.org/packages/xlsx-tools-mcp), non-mir
 
 ```
 ┌──────────────────────── Supervisor (MCP transport, stdio)
-│  src/xlsx_tools_mcp/server.py     25 MCP tools + instructions
+│  src/xlsx_tools_mcp/server.py     29 MCP tools + instructions
 │  src/xlsx_tools_mcp/settings.py   env vars, preloaded files, path resolution
 │  src/xlsx_tools_mcp/locking.py    per-file <path>.lock serialization
 │  src/xlsx_tools_mcp/errors.py     domain error types
@@ -259,9 +261,7 @@ All 29 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `search_workbook(query, sheet?, match_case?, limit?, path?)` | Substring search across one or all sheets. `sheet` restricts to one sheet; `match_case=True` makes it case-sensitive; `limit` caps matches. Returns `{"sheet", "cell", "value"}`. |
 | `aggregate_sheet(sheet, group_by, agg, cell_range?, has_header?, path?)` | Group and aggregate with pandas. `group_by` is a list of column names (taken from the header row); `agg` maps column name → aggregation function, e.g. `{"amount": "sum"}`. `has_header=True` (default) reads column names from the first row. Returns `{columns, records, row_count}`. |
 | `profile_sheet(sheet, sample_rows?, path?)` | Profile sheet metadata: inferred types, null counts, min/max, sample values. |
-| `query_sheet(sheet, filter_query, columns?, max_rows?, cell_range?, path?)` | Filter sheet data using pandas expressions. |
-| `create_table(sheet, cell_range, table_name, style_name?, show_filter?, show_row_stripes?, path?)` | Create a formal Excel Table over a range. |
-| `create_chart(sheet, chart_type, data_range, categories_range?, title?, target_cell?, path?)` | Add a native Excel chart (bar, line, pie, scatter). |
+| `query_sheet(sheet, filter_query, columns?, max_rows?, cell_range?, path?)` | Filter sheet data using pandas expressions with AST-hardened code injection defense. |
 
 ### Write
 
@@ -283,6 +283,8 @@ All 29 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `set_cell_style(sheet, cell_range, style, path?)` | Apply formatting to a range (e.g. `"A1:D1"`). `style` keys: `bold`, `italic`, `font_size`, `font_color` (hex RGB, e.g. `"FF0000"`), `bg_color` (hex RGB), `horizontal`, `vertical` (alignment), `border` (`"thin"`, `"medium"`, `"thick"`, …), `number_format` (e.g. `"#,##0.00"`). |
 | `autofit_columns(sheet, min_width?, max_width?, padding?, path?)` | Automatically adjust column widths based on maximum text length to prevent clipping. |
 | `clear_range(sheet, cell_range, clear_values?, clear_styles?, path?)` | Clear cell values and/or styles within a specified range without deleting rows or columns. |
+| `create_table(sheet, cell_range, table_name, style_name?, show_filter?, show_row_stripes?, path?)` | Create a formal Excel Table over a range. |
+| `create_chart(sheet, chart_type, data_range, categories_range?, title?, target_cell?, path?)` | Add a native Excel chart (bar, line, pie, scatter). |
 | `recalculate_workbook(path?)` | Force a LibreOffice headless recalculation pass and report any formula errors found. |
 | `restore_backup(backup_path, target_path)` | Restore a `.bak` backup file over a target workbook atomically. |
 

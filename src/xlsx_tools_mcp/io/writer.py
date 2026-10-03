@@ -16,6 +16,7 @@ import re
 import shutil
 import datetime
 from ..errors import SheetNotFoundError, UnsafeFormulaError
+from .. import settings
 from ..settings import AUTO_BACKUP, BACKUP_DIR
 
 
@@ -24,17 +25,22 @@ from ..settings import AUTO_BACKUP, BACKUP_DIR
 UNSAFE_FORMULA_PATTERN = re.compile(r"\b(WEBSERVICE|HYPERLINK|INDIRECT|RTD|CALL|REGISTER)\s*\(", re.IGNORECASE)
 
 def _validate_formula(formula: str, allow_external_formulas: bool = False) -> None:
-    if not allow_external_formulas and isinstance(formula, str) and formula.strip().startswith(("=", "+", "-", "@")):
-        if UNSAFE_FORMULA_PATTERN.search(formula):
-            raise UnsafeFormulaError(f"Formula contains unsafe function: {formula}")
+    if not allow_external_formulas and isinstance(formula, str):
+        text = formula.strip()
+        if text.startswith(("=", "+", "-", "@")):
+            if "|" in text:
+                raise UnsafeFormulaError(f"Formula contains unsafe DDE command execution syntax: {formula}")
+            if UNSAFE_FORMULA_PATTERN.search(text):
+                raise UnsafeFormulaError(f"Formula contains unsafe function: {formula}")
 
 def _create_backup(path: str) -> None:
     p = Path(path)
     if not p.exists():
         return
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    if BACKUP_DIR:
-        backup_dir = Path(BACKUP_DIR)
+    target_backup_dir = BACKUP_DIR or getattr(settings, "BACKUP_DIR", "")
+    if target_backup_dir:
+        backup_dir = Path(target_backup_dir)
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir / f"{p.name}.{timestamp}.bak"
     else:
@@ -480,6 +486,22 @@ def create_table(
         raise ValueError(f"Invalid cell_range: {cell_range}")
     if min_row >= max_row:
         raise ValueError(f"Table range '{cell_range}' must span at least 2 rows (1 header row and at least 1 data row)")
+
+    seen_headers: set[str] = set()
+    for col_idx in range(min_col, max_col + 1):
+        cell_val = ws.cell(row=min_row, column=col_idx).value
+        if cell_val is None or str(cell_val).strip() == "":
+            raise ValueError(
+                f"Table header cell at row {min_row}, column {col_idx} is empty. "
+                "Excel tables require all header cells in the top row to contain non-empty text."
+            )
+        header_str = str(cell_val).strip()
+        if header_str in seen_headers:
+            raise ValueError(
+                f"Duplicate table column header '{header_str}' found at row {min_row}, column {col_idx}. "
+                "Excel tables require unique column header names."
+            )
+        seen_headers.add(header_str)
 
     tab = Table(displayName=table_name, ref=cell_range)
     style = TableStyleInfo(

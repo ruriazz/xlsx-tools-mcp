@@ -558,7 +558,7 @@ def profile_sheet(
 def query_sheet(
     sheet: str, filter_query: str, columns: list[str] | None = None, max_rows: int = 100, cell_range: str | None = None, path: str | None = None
 ) -> dict[str, Any]:
-    """Query sheet data using pandas expressions without loading entire sheet into context.
+    """Query sheet data using pandas expressions without returning the entire sheet into the LLM context.
 
     Args:
         path: Path to the .xlsx file, or the name of a preloaded file. Omit if only

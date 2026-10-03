@@ -45,6 +45,59 @@ def aggregate_sheet(
     }
 
 
+import ast
+
+_ALLOWED_AST_NODES = (
+    ast.Expression,
+    ast.BoolOp,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Compare,
+    ast.Name,
+    ast.Constant,
+    ast.Load,
+    ast.And,
+    ast.Or,
+    ast.Not,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+    ast.In,
+    ast.NotIn,
+    ast.List,
+    ast.Tuple,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.BitAnd,
+    ast.BitOr,
+    ast.BitXor,
+    ast.Invert,
+)
+
+
+def _validate_safe_query(filter_query: str) -> None:
+    if "@" in filter_query:
+        raise ValueError("Invalid query: environment variable references ('@') are not permitted.")
+    try:
+        tree = ast.parse(filter_query, mode="eval")
+    except SyntaxError as e:
+        raise ValueError(f"Invalid query syntax: {e}") from e
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _ALLOWED_AST_NODES):
+            raise ValueError(f"Invalid query: operation '{type(node).__name__}' is not permitted.")
+        if isinstance(node, ast.Name) and node.id.startswith("__"):
+            raise ValueError(f"Invalid query: private/dunder names ('{node.id}') are not permitted.")
+
+
 def query_sheet(
     path: str,
     sheet: str,
@@ -68,6 +121,8 @@ def query_sheet(
     """
     if max_rows < 0:
         raise ValueError(f"max_rows must be non-negative, got {max_rows}")
+
+    _validate_safe_query(filter_query)
 
     rows = reader.read_sheet(path, sheet, cell_range=cell_range)["rows"]
     if not rows:
