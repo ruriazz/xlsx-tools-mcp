@@ -138,3 +138,57 @@ def test_set_cell_style_applies_bold_and_fill(workbook_path):
     assert cell.font.bold is True
     assert cell.fill.start_color.rgb.endswith("FF0000")
     wb.close()
+
+
+def test_rename_sheet(workbook_path):
+    writer.rename_sheet(workbook_path, "Data", "NewData")
+    wb = openpyxl.load_workbook(workbook_path)
+    assert "NewData" in wb.sheetnames
+    assert "Data" not in wb.sheetnames
+    wb.close()
+
+
+def test_rename_sheet_invalid(workbook_path):
+    with pytest.raises(ValueError):
+        writer.rename_sheet(workbook_path, "Data", "Invalid[]Name")
+
+
+def test_copy_sheet(workbook_path):
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "test"}])
+    writer.copy_sheet(workbook_path, "Data", "DataCopy")
+    wb = openpyxl.load_workbook(workbook_path)
+    assert "DataCopy" in wb.sheetnames
+    assert wb["DataCopy"]["A1"].value == "test"
+    wb.close()
+
+
+def test_autofit_columns(workbook_path):
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "Very long text to autofit"}], recalculate=False)
+    writer.autofit_columns(workbook_path, "Data")
+    wb = openpyxl.load_workbook(workbook_path)
+    assert wb["Data"].column_dimensions["A"].width > 20
+    wb.close()
+
+
+def test_clear_range(workbook_path):
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "test"}, {"cell": "B1", "value": "keep"}])
+    writer.set_cell_style(workbook_path, "Data", "A1", {"bold": True})
+    
+    writer.clear_range(workbook_path, "Data", "A1:A1", clear_values=True, clear_styles=True)
+    wb = openpyxl.load_workbook(workbook_path)
+    assert wb["Data"]["A1"].value is None
+    assert wb["Data"]["A1"].font.bold is False
+    assert wb["Data"]["B1"].value == "keep"
+    wb.close()
+
+
+def test_clear_range_full_column_unbounded(workbook_path):
+    # "A:A" covers openpyxl 1 million rows, must safely bound to max_row without OOM/hang
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "top"}, {"cell": "A2", "value": "bottom"}], recalculate=False)
+    writer.clear_range(workbook_path, "Data", "A:A", clear_values=True)
+    wb = openpyxl.load_workbook(workbook_path)
+    assert wb["Data"]["A1"].value is None
+    assert wb["Data"]["A2"].value is None
+    wb.close()
+
+

@@ -64,7 +64,14 @@ def _slice_range(data: list[list[Any]], cell_range: str) -> list[list[Any]]:
     return sliced
 
 
-def read_sheet(path: str, sheet: str, cell_range: str | None = None, max_rows: int | None = None) -> dict[str, Any]:
+def read_sheet(
+    path: str,
+    sheet: str,
+    cell_range: str | None = None,
+    max_rows: int | None = None,
+    offset_row: int = 0,
+    format: str = "array",
+) -> dict[str, Any]:
     """Read cell values as a 2D array, addressed absolutely from A1 (row/col 1 = A1).
 
     Primary path: python-calamine (fast, accurate type inference). Falls back to
@@ -74,6 +81,8 @@ def read_sheet(path: str, sheet: str, cell_range: str | None = None, max_rows: i
 
     `max_rows` optionally caps the number of rows returned, to bound response size
     for large sheets. `None` means no limit.
+    `offset_row` skips a number of data rows (useful for pagination).
+    `format` can be "array" (default 2D list), "records" (list of dicts), or "markdown" (table string).
     """
     try:
         wb = CalamineWorkbook.from_path(path)
@@ -89,15 +98,51 @@ def read_sheet(path: str, sheet: str, cell_range: str | None = None, max_rows: i
     if cell_range:
         data = _slice_range(data, cell_range)
 
+    column_count = max((len(row) for row in data), default=0)
+
+    def _escape_md(val: Any) -> str:
+        if val is None:
+            return ""
+        return str(val).replace("\n", " ").replace("|", "\\|")
+
+    if format in ("records", "markdown") and data:
+        if format == "markdown":
+            headers = [_escape_md(x) if x is not None else f"Column{i+1}" for i, x in enumerate(data[0])]
+        else:
+            headers = [str(x) if x is not None else f"Column{i+1}" for i, x in enumerate(data[0])]
+        data_rows = data[1:]
+    else:
+        headers = []
+        data_rows = data
+
+    if offset_row > 0:
+        data_rows = data_rows[offset_row:]
+
     if max_rows is not None:
-        data = data[:max_rows]
+        data_rows = data_rows[:max_rows]
+
+    formatted_data: Any
+    if format == "records":
+        formatted_data = [dict(zip(headers, row)) for row in data_rows]
+    elif format == "markdown":
+        if not data:
+            formatted_data = ""
+        else:
+            lines = []
+            lines.append("| " + " | ".join(headers) + " |")
+            lines.append("|" + "|".join(["---"] * len(headers)) + "|")
+            for row in data_rows:
+                lines.append("| " + " | ".join(_escape_md(x) for x in row) + " |")
+            formatted_data = "\n".join(lines)
+    else:
+        formatted_data = data_rows
 
     return {
         "sheet": sheet,
         "cell_range": cell_range,
-        "rows": data,
-        "row_count": len(data),
-        "column_count": max((len(row) for row in data), default=0),
+        "rows": formatted_data,
+        "row_count": len(data_rows),
+        "column_count": column_count,
     }
 
 

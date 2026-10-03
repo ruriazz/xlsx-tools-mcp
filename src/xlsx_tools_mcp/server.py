@@ -98,9 +98,14 @@ def get_workbook_info(path: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def read_sheet(
-    sheet: str, cell_range: str | None = None, max_rows: int | None = None, path: str | None = None
+    sheet: str,
+    cell_range: str | None = None,
+    max_rows: int | None = None,
+    offset_row: int = 0,
+    format: str = "array",
+    path: str | None = None,
 ) -> dict[str, Any]:
-    """Read cell values from a sheet as a 2D array, addressed absolutely from A1.
+    """Read cell values from a sheet.
 
     Args:
         path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
@@ -108,10 +113,12 @@ def read_sheet(
         sheet: Sheet name.
         cell_range: Optional A1-style range (e.g. "B2:F20"). Omit to read the full used area.
         max_rows: Optional cap on the number of rows returned, to bound response size for large sheets.
+        offset_row: Skip a number of data rows (0-indexed from first data row).
+        format: "array" (default 2D list), "records" (list of dicts, first row as keys), or "markdown" (table string).
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: reader.read_sheet(path, sheet, cell_range, max_rows))
+        return _run(lambda: reader.read_sheet(path, sheet, cell_range, max_rows, offset_row, format))
 
 
 @mcp.tool()
@@ -406,6 +413,85 @@ def set_cell_style(sheet: str, cell_range: str, style: dict[str, Any], path: str
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: writer.set_cell_style(path, sheet, cell_range, style))
+
+
+@mcp.tool()
+def rename_sheet(old_name: str, new_name: str, path: str | None = None) -> dict[str, Any]:
+    """Rename an existing sheet.
+
+    Warning: This tool does NOT automatically update formula references in other sheets.
+    Formulas depending on the old sheet name will break.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        old_name: Current name of the sheet.
+        new_name: New name for the sheet (1-31 chars, valid Excel sheet name).
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.rename_sheet(path, old_name, new_name))
+
+
+@mcp.tool()
+def copy_sheet(source_sheet: str, target_sheet: str, path: str | None = None) -> dict[str, Any]:
+    """Duplicate a sheet including its contents, formulas, and styles.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        source_sheet: Name of the sheet to duplicate.
+        target_sheet: Name of the new sheet (1-31 chars, valid Excel sheet name).
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.copy_sheet(path, source_sheet, target_sheet))
+
+
+@mcp.tool()
+def autofit_columns(
+    sheet: str,
+    min_width: int = 10,
+    max_width: int = 50,
+    padding: int = 3,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Automatically adjust column widths based on maximum text length.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        min_width: Minimum allowed column width.
+        max_width: Maximum allowed column width.
+        padding: Extra padding characters to add to max length.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.autofit_columns(path, sheet, min_width, max_width, padding))
+
+
+@mcp.tool()
+def clear_range(
+    sheet: str,
+    cell_range: str,
+    clear_values: bool = True,
+    clear_styles: bool = False,
+    path: str | None = None,
+) -> dict[str, Any]:
+    """Clear cell values and/or styles within a specified range without deleting rows or columns.
+
+    Args:
+        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
+            one file is configured.
+        sheet: Sheet name.
+        cell_range: A1-style range (e.g. "A1:D10") to clear.
+        clear_values: Whether to clear cell values (True by default).
+        clear_styles: Whether to clear cell styles/formats (False by default).
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.clear_range(path, sheet, cell_range, clear_values, clear_styles))
 
 
 @mcp.tool()

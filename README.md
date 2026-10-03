@@ -10,7 +10,7 @@ An MCP server for reading and writing Excel (.xlsx) files with high accuracy, wh
 
 ## Overview
 
-`xlsx-tools-mcp` exposes 20 Model Context Protocol (MCP) tools that give an LLM agent accurate, structure-preserving read **and** write access to Excel `.xlsx` files. It runs as a standard stdio MCP server: you install it and register it with an MCP client (Claude Code, OpenCode, etc.), and the client's agent can list sheets, read cell ranges, search values, aggregate data, write cells/formulas, manage sheets/rows/columns, apply styles, and force formula recalculation.
+`xlsx-tools-mcp` exposes 24 Model Context Protocol (MCP) tools that give an LLM agent accurate, structure-preserving read **and** write access to Excel `.xlsx` files. It runs as a standard stdio MCP server: you install it and register it with an MCP client (Claude Code, OpenCode, etc.), and the client's agent can list sheets, read cell ranges, search values, aggregate data, write cells/formulas, manage sheets/rows/columns, apply styles, and force formula recalculation.
 
 It is built around the principle that editing an existing workbook should **not** destroy what it doesn't touch.
 
@@ -38,7 +38,7 @@ Live via [pypistats.org](https://pypistats.org/packages/xlsx-tools-mcp), non-mir
 
 ```
 ┌──────────────────────── Supervisor (MCP transport, stdio)
-│  src/xlsx_tools_mcp/server.py     20 MCP tools + instructions
+│  src/xlsx_tools_mcp/server.py     24 MCP tools + instructions
 │  src/xlsx_tools_mcp/settings.py   env vars, preloaded files, path resolution
 │  src/xlsx_tools_mcp/locking.py    per-file <path>.lock serialization
 │  src/xlsx_tools_mcp/errors.py     domain error types
@@ -240,7 +240,7 @@ With `alias`/`filename` as the alias:
 
 ## Tool reference
 
-All 20 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
+All 24 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
 
 > **Response shape (all write tools):** every write tool returns `{"saved": bool, "recalculated": bool, "errors_found": list, "message": str}`. When non-empty, `errors_found` is a list of `{"sheet": "...", "cell": "B2", "error": "#DIV/0!"}`.
 
@@ -251,7 +251,7 @@ All 20 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `list_configured_files()` | List files preloaded at startup via `XLSX_MCP_FILES`, as an alias → absolute-path map. Call this first if unsure what's available. |
 | `list_sheets(path?)` | List every sheet in the workbook with approximate row/column counts (calamine). |
 | `get_workbook_info(path?)` | Workbook-level metadata: per-sheet exact dimensions, `max_row`/`max_column`, sheet state, the active sheet, and defined names. |
-| `read_sheet(sheet, cell_range?, max_rows?, path?)` | Read cell values as a 2D array addressed absolutely from A1. `cell_range` is an optional A1-style range (e.g. `"B2:F20"`); omit to read the full used area. `max_rows` optionally caps the number of rows returned. |
+| `read_sheet(sheet, cell_range?, max_rows?, offset_row?, format?, path?)` | Read cell values. `cell_range` limits the reading area. `max_rows` caps rows. `offset_row` skips a number of rows for pagination. `format` can be "array" (2D list), "records" (list of dicts using first row as keys), or "markdown" (table string). |
 | `get_cell(sheet, cell, path?)` | Full detail for a single cell: value (cached computed), formula, number format, font (bold/italic/size/color), fill color, merge state, comment. |
 | `search_workbook(query, sheet?, match_case?, limit?, path?)` | Substring search across one or all sheets. `sheet` restricts to one sheet; `match_case=True` makes it case-sensitive; `limit` caps matches. Returns `{"sheet", "cell", "value"}`. |
 | `aggregate_sheet(sheet, group_by, agg, cell_range?, has_header?, path?)` | Group and aggregate with pandas. `group_by` is a list of column names (taken from the header row); `agg` maps column name → aggregation function, e.g. `{"amount": "sum"}`. `has_header=True` (default) reads column names from the first row. Returns `{columns, records, row_count}`. |
@@ -265,6 +265,8 @@ All 20 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `append_rows(sheet, rows, create_sheet_if_missing?, recalculate?, path?)` | Append rows after the last used row. `rows` is a list of rows, each a list of cell values in column order. |
 | `create_sheet(sheet, index?, path?)` | Add a new empty sheet. `index` is a zero-based insert position; omit to append at the end. |
 | `delete_sheet(sheet, path?)` | Delete a sheet. Fails if it's the only sheet left. |
+| `rename_sheet(old_name, new_name, path?)` | Rename an existing sheet. |
+| `copy_sheet(source_sheet, target_sheet, path?)` | Duplicate a sheet including its contents, formulas, and styles. |
 | `insert_rows(sheet, start_row, count?, recalculate?, path?)` | Insert blank rows before `start_row` (1-based), shifting existing rows down. `count` defaults to 1. |
 | `delete_rows(sheet, start_row, count?, recalculate?, path?)` | Delete rows starting at `start_row` (1-based), shifting rows below upward. `count` defaults to 1. |
 | `insert_columns(sheet, start_column, count?, recalculate?, path?)` | Insert blank columns before `start_column` (1-based), shifting existing columns right. `count` defaults to 1. |
@@ -272,6 +274,8 @@ All 20 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `merge_cells(sheet, cell_range, path?)` | Merge a rectangular range (e.g. `"A1:C1"`) into one cell. |
 | `unmerge_cells(sheet, cell_range, path?)` | Undo a merge on a previously-merged range. |
 | `set_cell_style(sheet, cell_range, style, path?)` | Apply formatting to a range (e.g. `"A1:D1"`). `style` keys: `bold`, `italic`, `font_size`, `font_color` (hex RGB, e.g. `"FF0000"`), `bg_color` (hex RGB), `horizontal`, `vertical` (alignment), `border` (`"thin"`, `"medium"`, `"thick"`, …), `number_format` (e.g. `"#,##0.00"`). |
+| `autofit_columns(sheet, min_width?, max_width?, padding?, path?)` | Automatically adjust column widths based on maximum text length to prevent clipping. |
+| `clear_range(sheet, cell_range, clear_values?, clear_styles?, path?)` | Clear cell values and/or styles within a specified range without deleting rows or columns. |
 | `recalculate_workbook(path?)` | Force a LibreOffice headless recalculation pass and report any formula errors found. |
 
 ### Example payload — `write_cells`

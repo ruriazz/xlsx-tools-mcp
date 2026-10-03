@@ -199,6 +199,12 @@ def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any]
     wb = _load(path)
     ws = _ws(wb, sheet)
     min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    min_col = min_col or 1
+    min_row = min_row or 1
+    if max_col is None:
+        max_col = max(ws.max_column or 1, min_col)
+    if max_row is None:
+        max_row = max(ws.max_row or 1, min_row)
 
     font_kwargs = {k: style[k] for k in ("bold", "italic") if k in style}
     if "font_size" in style:
@@ -236,3 +242,95 @@ def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any]
                 cell.number_format = number_format
 
     return _finalize(wb, path, recalc=False)
+
+
+def _validate_sheet_name(name: str) -> None:
+    if not name or len(name) > 31:
+        raise ValueError("Sheet name must be 1-31 characters long")
+    if any(c in name for c in r"\/?*[]:"):
+        raise ValueError(r"Sheet name cannot contain \ / ? * : [ ]")
+
+
+def rename_sheet(path: str, old_name: str, new_name: str) -> dict[str, Any]:
+    """Rename an existing sheet.
+
+    Note: Renaming a sheet does not automatically rewrite formulas in other sheets
+    referencing the old name (openpyxl limitation). Dependent formulas will break.
+    """
+    wb = _load(path)
+    ws = _ws(wb, old_name)
+
+    if new_name in wb.sheetnames:
+        raise ValueError(f"Sheet '{new_name}' already exists")
+    _validate_sheet_name(new_name)
+
+    ws.title = new_name
+    return _finalize(wb, path, recalc=False)
+
+
+def copy_sheet(path: str, source_sheet: str, target_sheet: str) -> dict[str, Any]:
+    wb = _load(path)
+    source_ws = _ws(wb, source_sheet)
+
+    if target_sheet in wb.sheetnames:
+        raise ValueError(f"Sheet '{target_sheet}' already exists")
+    _validate_sheet_name(target_sheet)
+
+    new_ws = wb.copy_worksheet(source_ws)
+    new_ws.title = target_sheet
+    return _finalize(wb, path, recalc=False)
+
+
+def autofit_columns(
+    path: str, sheet: str, min_width: int = 10, max_width: int = 50, padding: int = 3
+) -> dict[str, Any]:
+    wb = _load(path)
+    ws = _ws(wb, sheet)
+
+    for col in ws.columns:
+        if not col:
+            continue
+        max_length = 0
+        column_letter = col[0].column_letter
+
+        for cell in col:
+            try:
+                if cell.value is not None:
+                    max_length = max(max_length, len(str(cell.value)))
+            except Exception:
+                pass
+
+        adjusted_width = min(max_width, max(min_width, max_length + padding))
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+    return _finalize(wb, path, recalc=False)
+
+
+def clear_range(
+    path: str, sheet: str, cell_range: str, clear_values: bool = True, clear_styles: bool = False
+) -> dict[str, Any]:
+    wb = _load(path)
+    ws = _ws(wb, sheet)
+    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+
+    # Bound coordinates to worksheet used area to prevent DoS / OOM on full-column/row ranges like "A:A"
+    if ws.max_row is None or ws.max_column is None:
+        return _finalize(wb, path, recalc=False)
+
+    min_col = min_col or 1
+    min_row = min_row or 1
+    max_col = min(max_col, ws.max_column) if max_col is not None else ws.max_column
+    max_row = min(max_row, ws.max_row) if max_row is not None else ws.max_row
+
+    if min_col > max_col or min_row > max_row:
+        return _finalize(wb, path, recalc=False)
+
+    for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+        for cell in row:
+            if clear_values:
+                cell.value = None
+            if clear_styles:
+                cell.style = "Normal"
+
+    return _finalize(wb, path, recalc=clear_values)
+
