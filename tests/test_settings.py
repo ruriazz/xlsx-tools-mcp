@@ -56,3 +56,39 @@ def test_resolve_filename_match(monkeypatch):
 def test_resolve_unknown_path_returned_as_is(monkeypatch):
     monkeypatch.setattr("xlsx_tools_mcp.settings.CONFIGURED_FILES", {"a": "/x/a.xlsx"})
     assert resolve_path("/some/other.xlsx") == "/some/other.xlsx"
+from xlsx_tools_mcp.errors import AccessDeniedError
+import os
+
+def test_resolve_path_allowed_dirs(monkeypatch, tmp_path):
+    allowed_dir = str(tmp_path / "allowed")
+    os.makedirs(allowed_dir, exist_ok=True)
+    monkeypatch.setattr("xlsx_tools_mcp.settings.ALLOWED_DIRS", [allowed_dir])
+    
+    file_inside = str(tmp_path / "allowed" / "file.xlsx")
+    assert resolve_path(file_inside) == file_inside
+
+    file_outside = str(tmp_path / "outside" / "file.xlsx")
+    with pytest.raises(AccessDeniedError):
+        resolve_path(file_outside)
+
+def test_resolve_path_allowed_dirs_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr("xlsx_tools_mcp.settings.ALLOWED_DIRS", [])
+    file_outside = str(tmp_path / "outside" / "file.xlsx")
+    # should just return as is
+    assert resolve_path(file_outside) == file_outside
+
+
+def test_server_tools_enforce_allowed_dirs(monkeypatch, tmp_path):
+    from xlsx_tools_mcp import server
+    allowed_dir = str(tmp_path / "allowed")
+    os.makedirs(allowed_dir, exist_ok=True)
+    monkeypatch.setattr("xlsx_tools_mcp.settings.ALLOWED_DIRS", [allowed_dir])
+
+    # create_workbook outside allowed dir must raise
+    with pytest.raises(ValueError, match="Access denied"):
+        server.create_workbook(str(tmp_path / "outside" / "new.xlsx"))
+
+    # restore_backup outside allowed dir must raise
+    with pytest.raises(ValueError, match="Access denied"):
+        server.restore_backup(str(tmp_path / "outside" / "a.bak"), str(tmp_path / "outside" / "target.xlsx"))
+

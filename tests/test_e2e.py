@@ -51,3 +51,21 @@ def test_e2e_sheet_workflow(test_file):
     assert read_array_after_clear["rows"][0] == ["id", "name"]
     assert read_array_after_clear["rows"][1] == [1.0, "Alice"]
 
+
+def test_e2e_backup_and_restore(test_file):
+    # Enable backup
+    server.write_cells("Sheet1", [{"cell": "A1", "value": "first"}], backup=True, path=test_file)
+    
+    # Check if a backup was created
+    import glob
+    import os
+    backups = glob.glob(test_file.replace(".xlsx", "*.bak"))
+    assert len(backups) == 1
+    
+    # Restore it
+    server.restore_backup(backups[0], test_file)
+    
+    # Ensure it's empty again
+    read_array = server.read_sheet("Sheet1", path=test_file)
+    assert read_array["rows"] == []
+

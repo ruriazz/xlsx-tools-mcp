@@ -10,7 +10,7 @@ An MCP server for reading and writing Excel (.xlsx) files with high accuracy, wh
 
 ## Overview
 
-`xlsx-tools-mcp` exposes 24 Model Context Protocol (MCP) tools that give an LLM agent accurate, structure-preserving read **and** write access to Excel `.xlsx` files. It runs as a standard stdio MCP server: you install it and register it with an MCP client (Claude Code, OpenCode, etc.), and the client's agent can list sheets, read cell ranges, search values, aggregate data, write cells/formulas, manage sheets/rows/columns, apply styles, and force formula recalculation.
+`xlsx-tools-mcp` exposes 25 Model Context Protocol (MCP) tools that give an LLM agent accurate, structure-preserving read **and** write access to Excel `.xlsx` files. It runs as a standard stdio MCP server: you install it and register it with an MCP client (Claude Code, OpenCode, etc.), and the client's agent can list sheets, read cell ranges, search values, aggregate data, write cells/formulas, manage sheets/rows/columns, apply styles, and force formula recalculation.
 
 It is built around the principle that editing an existing workbook should **not** destroy what it doesn't touch.
 
@@ -21,6 +21,9 @@ It is built around the principle that editing an existing workbook should **not*
 - **Fast reads via python-calamine** — a Rust-backed parser for accurate, fast type inference, with an automatic openpyxl fallback when you need formulas/styles/comments or when calamine can't parse the file.
 - **pandas-based grouping/aggregation** — `aggregate_sheet` groups and aggregates on top of the normal read path, so merged cells and styling in the source range are preserved before flattening.
 - **Per-file locking** — concurrent tool calls (or other processes) touching the same workbook are serialized via a sibling `<path>.lock` file (filelock), so writes never interleave and corrupt the file.
+- **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`.
+- **Auto-backup** — Write tools will automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `XLSX_MCP_BACKUP_DIR` to save backups to a specific folder instead of alongside the target file.
+- **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, or `REGISTER` by default to prevent data exfiltration or malicious links. Pass `allow_external_formulas=True` to bypass this check.
 - **XML-bomb protection** — the `defusedxml` package is an automatic dependency; openpyxl detects it and uses its hardened XML parser, so hostile `xlsx` XML can't expand into resource exhaustion.
 - **Preload files at startup** — set `XLSX_MCP_FILES` to preload one or more workbooks; tools can then be called with `path` omitted or with a short alias instead of a full filesystem path.
 
@@ -38,7 +41,7 @@ Live via [pypistats.org](https://pypistats.org/packages/xlsx-tools-mcp), non-mir
 
 ```
 ┌──────────────────────── Supervisor (MCP transport, stdio)
-│  src/xlsx_tools_mcp/server.py     24 MCP tools + instructions
+│  src/xlsx_tools_mcp/server.py     25 MCP tools + instructions
 │  src/xlsx_tools_mcp/settings.py   env vars, preloaded files, path resolution
 │  src/xlsx_tools_mcp/locking.py    per-file <path>.lock serialization
 │  src/xlsx_tools_mcp/errors.py     domain error types
@@ -240,7 +243,7 @@ With `alias`/`filename` as the alias:
 
 ## Tool reference
 
-All 24 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
+All 25 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
 
 > **Response shape (all write tools):** every write tool returns `{"saved": bool, "recalculated": bool, "errors_found": list, "message": str}`. When non-empty, `errors_found` is a list of `{"sheet": "...", "cell": "B2", "error": "#DIV/0!"}`.
 
@@ -261,8 +264,8 @@ All 24 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | Tool | Description |
 |------|-------------|
 | `create_workbook(path, sheets?, overwrite?)` | Create a new `.xlsx`/`.xlsm` workbook. `sheets` defaults to `["Sheet1"]`. `overwrite=True` replaces an existing file. `path` is **required** (new files are never preloaded). |
-| `write_cells(sheet, cells, create_sheet_if_missing?, recalculate?, path?)` | Write values and/or formulas into specific cells. `cells` is a list of `{"cell": "A1", "value": ...}` or `{"cell": "B1", "formula": "=A1*2"}`. Optionally create the sheet first; `recalculate=True` (default) runs the LibreOffice recompute. |
-| `append_rows(sheet, rows, create_sheet_if_missing?, recalculate?, path?)` | Append rows after the last used row. `rows` is a list of rows, each a list of cell values in column order. |
+| `write_cells(sheet, cells, create_sheet_if_missing?, recalculate?, allow_external_formulas?, backup?, path?)` | Write values and/or formulas into specific cells. `cells` is a list of `{"cell": "A1", "value": ...}` or `{"cell": "B1", "formula": "=A1*2"}`. Optionally create the sheet first; `recalculate=True` (default) runs the LibreOffice recompute. |
+| `append_rows(sheet, rows, create_sheet_if_missing?, recalculate?, allow_external_formulas?, backup?, path?)` | Append rows after the last used row. `rows` is a list of rows, each a list of cell values in column order. |
 | `create_sheet(sheet, index?, path?)` | Add a new empty sheet. `index` is a zero-based insert position; omit to append at the end. |
 | `delete_sheet(sheet, path?)` | Delete a sheet. Fails if it's the only sheet left. |
 | `rename_sheet(old_name, new_name, path?)` | Rename an existing sheet. |
@@ -277,6 +280,7 @@ All 24 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/
 | `autofit_columns(sheet, min_width?, max_width?, padding?, path?)` | Automatically adjust column widths based on maximum text length to prevent clipping. |
 | `clear_range(sheet, cell_range, clear_values?, clear_styles?, path?)` | Clear cell values and/or styles within a specified range without deleting rows or columns. |
 | `recalculate_workbook(path?)` | Force a LibreOffice headless recalculation pass and report any formula errors found. |
+| `restore_backup(backup_path, target_path)` | Restore a `.bak` backup file over a target workbook atomically. |
 
 ### Example payload — `write_cells`
 
@@ -322,6 +326,9 @@ If a formula this touches produced an error, `errors_found` would look like:
 
 ## Security & concurrency
 
+- **Path confinement** — `XLSX_MCP_ALLOWED_DIRS` (comma-separated) restricts all reads and writes to specific directories. If set, any attempt to access a file outside these boundaries raises `AccessDeniedError`.
+- **Auto-backup** — Write tools will automatically create a `.bak` sibling file before modifying the workbook if `backup=True` (which defaults to `XLSX_MCP_AUTO_BACKUP=true`). Use `XLSX_MCP_BACKUP_DIR` to save backups to a specific folder instead of alongside the target file.
+- **Formula injection guard** — `write_cells` and `append_rows` reject formulas containing `WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`, `CALL`, or `REGISTER` by default to prevent data exfiltration or malicious links. Pass `allow_external_formulas=True` to bypass this check.
 - **XML-bomb protection** — `defusedxml` is an automatic dependency of this package. openpyxl auto-detects it and uses its hardened XML parser, so a malicious `.xlsx` (a zip of XML) can't trigger entity-expansion resource exhaustion. No configuration needed.
 - **Per-file locking** — every read/write acquires a sibling `<path>.lock` file (via `filelock`). Concurrent tool calls or other processes touching the same workbook are serialized so writes never interleave and corrupt the file.
 - **Recalc timeout** — `XLSX_MCP_RECALC_TIMEOUT` (seconds, default `60`) caps how long the LibreOffice recalculation pass may run.

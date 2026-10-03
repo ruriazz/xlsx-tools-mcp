@@ -37,6 +37,27 @@
           "isSecret": false,
           "format": "string",
           "description": "Timeout in seconds to acquire the per-file lock (default 10)"
+        },
+        {
+          "name": "XLSX_MCP_ALLOWED_DIRS",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Comma-separated list of allowed directories to restrict file access"
+        },
+        {
+          "name": "XLSX_MCP_AUTO_BACKUP",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Enable automatic backup creation before workbook mutations (default true)"
+        },
+        {
+          "name": "XLSX_MCP_BACKUP_DIR",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Optional custom directory to store backup files instead of beside the target file"
         }
       ]
     }

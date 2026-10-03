@@ -12,3 +12,11 @@ class LockTimeoutError(XlsxMcpError):
 
 class FileNotConfiguredError(XlsxMcpError):
     """Raised when `path` is omitted but zero or multiple files are preconfigured."""
+
+
+class AccessDeniedError(XlsxMcpError):
+    """Raised when path is outside the allowed directories boundaries."""
+
+
+class UnsafeFormulaError(XlsxMcpError):
+    """Raised when an unsafe formula function is detected."""

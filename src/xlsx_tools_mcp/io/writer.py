@@ -10,9 +10,57 @@ from openpyxl.utils import range_boundaries
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from ..errors import SheetNotFoundError
 from ..recalc import recalculate
 
+import re
+import shutil
+import datetime
+from ..errors import SheetNotFoundError, UnsafeFormulaError
+from ..settings import AUTO_BACKUP, BACKUP_DIR
+
+
+
+
+UNSAFE_FORMULA_PATTERN = re.compile(r"\b(WEBSERVICE|HYPERLINK|INDIRECT|RTD|CALL|REGISTER)\s*\(", re.IGNORECASE)
+
+def _validate_formula(formula: str, allow_external_formulas: bool = False) -> None:
+    if not allow_external_formulas and isinstance(formula, str) and formula.strip().startswith(("=", "+", "-", "@")):
+        if UNSAFE_FORMULA_PATTERN.search(formula):
+            raise UnsafeFormulaError(f"Formula contains unsafe function: {formula}")
+
+def _create_backup(path: str) -> None:
+    p = Path(path)
+    if not p.exists():
+        return
+    timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    if BACKUP_DIR:
+        backup_dir = Path(BACKUP_DIR)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"{p.name}.{timestamp}.bak"
+    else:
+        backup_path = p.with_name(f"{p.name}.{timestamp}.bak")
+    shutil.copy2(path, backup_path)
+
+def restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
+    b = Path(backup_path)
+    if not b.exists():
+        raise FileNotFoundError(f"Backup file not found: {backup_path}")
+    if b.suffix.lower() != ".bak":
+        raise ValueError(f"Refusing to restore from non-backup file: {backup_path}. Must have .bak extension.")
+    
+    t = Path(target_path)
+    if t.suffix.lower() not in _EXCEL_EXTENSIONS:
+        raise ValueError(f"Refusing to restore to non-Excel file: {target_path}. Must be .xlsx/.xlsm.")
+
+    tmp_path = f"{target_path}.tmp-{os.getpid()}"
+    try:
+        shutil.copy2(backup_path, tmp_path)
+        os.replace(tmp_path, target_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    
+    return {"restored": True, "target": target_path, "backup": backup_path, "message": "Backup restored successfully."}
 
 def _load(path: str) -> Workbook:
     return openpyxl.load_workbook(path, data_only=False)
@@ -24,13 +72,15 @@ def _ws(wb: Workbook, sheet: str) -> Worksheet:
     return wb[sheet]
 
 
-def _atomic_save(wb: Workbook, path: str) -> None:
+def _atomic_save(wb: Workbook, path: str, backup: bool = False) -> None:
     """Save to a temp file in the same directory, then atomically replace `path`.
 
     A plain `wb.save(path)` writes straight onto the target — if the process dies
     mid-write (crash, OOM kill, disk full), the file is left half-written and
     unrecoverable. `os.replace` only swaps the two once the temp file is complete.
     """
+    if backup:
+        _create_backup(path)
     tmp_path = f"{path}.tmp-{os.getpid()}"
     try:
         wb.save(tmp_path)
@@ -40,14 +90,14 @@ def _atomic_save(wb: Workbook, path: str) -> None:
             os.remove(tmp_path)
 
 
-def _finalize(wb: Workbook, path: str, recalc: bool = True) -> dict[str, Any]:
+def _finalize(wb: Workbook, path: str, recalc: bool = True, backup: bool = False) -> dict[str, Any]:
     """Save via openpyxl (preserves everything it didn't touch), then recalculate.
 
     `recalc=False` skips the LibreOffice round-trip for structural edits (merge,
     style, sheet add/remove) that can't produce a stale formula result — recalc is
     still cheap to run for anything that touches cell values or formulas.
     """
-    _atomic_save(wb, path)
+    _atomic_save(wb, path, backup=backup)
     wb.close()
     if not recalc:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Saved (no recalculation needed)."}
@@ -78,7 +128,7 @@ def create_workbook(path: str, sheets: list[str] | None = None, overwrite: bool 
         wb.create_sheet(name)
 
     p.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_save(wb, path)
+    _atomic_save(wb, path, backup=False)
     wb.close()
     return {
         "saved": True,
@@ -96,6 +146,8 @@ def write_cells(
     cells: list[dict[str, Any]],
     create_sheet_if_missing: bool = False,
     recalculate: bool = True,
+    allow_external_formulas: bool = False,
+    backup: bool = AUTO_BACKUP,
 ) -> dict[str, Any]:
     if not cells:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Nothing to write; file unchanged."}
@@ -109,9 +161,14 @@ def write_cells(
         if not coord:
             raise ValueError(f"Each item in `cells` requires a 'cell' key, got: {item}")
         formula = item.get("formula")
-        ws[coord] = formula if formula is not None else item.get("value")
+        value = item.get("value")
+        if formula is not None:
+            _validate_formula(formula, allow_external_formulas)
+        elif isinstance(value, str):
+            _validate_formula(value, allow_external_formulas)
+        ws[coord] = formula if formula is not None else value
 
-    return _finalize(wb, path, recalc=recalculate)
+    return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def append_rows(
@@ -120,6 +177,8 @@ def append_rows(
     rows: list[list[Any]],
     create_sheet_if_missing: bool = False,
     recalculate: bool = True,
+    allow_external_formulas: bool = False,
+    backup: bool = AUTO_BACKUP,
 ) -> dict[str, Any]:
     if not rows:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Nothing to write; file unchanged."}
@@ -129,73 +188,76 @@ def append_rows(
     ws = _ws(wb, sheet)
 
     for row in rows:
+        for cell_val in row:
+            if isinstance(cell_val, str):
+                _validate_formula(cell_val, allow_external_formulas)
         ws.append(row)
 
-    return _finalize(wb, path, recalc=recalculate)
+    return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
-def create_sheet(path: str, sheet: str, index: int | None = None) -> dict[str, Any]:
+def create_sheet(path: str, sheet: str, index: int | None = None, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     wb = _load(path)
     if sheet in wb.sheetnames:
         raise ValueError(f"Sheet '{sheet}' already exists")
     wb.create_sheet(sheet, index)
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
-def delete_sheet(path: str, sheet: str) -> dict[str, Any]:
+def delete_sheet(path: str, sheet: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet)
     if len(wb.sheetnames) == 1:
         raise ValueError("Cannot delete the only sheet in a workbook")
     del wb[sheet]
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def insert_rows(
-    path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True
+    path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet).insert_rows(start_row, count)
-    return _finalize(wb, path, recalc=recalculate)
+    return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def delete_rows(
-    path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True
+    path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet).delete_rows(start_row, count)
-    return _finalize(wb, path, recalc=recalculate)
+    return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def insert_columns(
-    path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True
+    path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet).insert_cols(start_column, count)
-    return _finalize(wb, path, recalc=recalculate)
+    return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def delete_columns(
-    path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True
+    path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet).delete_cols(start_column, count)
-    return _finalize(wb, path, recalc=recalculate)
+    return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
-def merge_cells(path: str, sheet: str, cell_range: str) -> dict[str, Any]:
+def merge_cells(path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet).merge_cells(cell_range)
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
-def unmerge_cells(path: str, sheet: str, cell_range: str) -> dict[str, Any]:
+def unmerge_cells(path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     wb = _load(path)
     _ws(wb, sheet).unmerge_cells(cell_range)
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
-def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any]) -> dict[str, Any]:
+def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any], backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     wb = _load(path)
     ws = _ws(wb, sheet)
     min_col, min_row, max_col, max_row = range_boundaries(cell_range)
@@ -241,7 +303,7 @@ def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any]
             if number_format:
                 cell.number_format = number_format
 
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def _validate_sheet_name(name: str) -> None:
@@ -251,7 +313,7 @@ def _validate_sheet_name(name: str) -> None:
         raise ValueError(r"Sheet name cannot contain \ / ? * : [ ]")
 
 
-def rename_sheet(path: str, old_name: str, new_name: str) -> dict[str, Any]:
+def rename_sheet(path: str, old_name: str, new_name: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     """Rename an existing sheet.
 
     Note: Renaming a sheet does not automatically rewrite formulas in other sheets
@@ -265,10 +327,10 @@ def rename_sheet(path: str, old_name: str, new_name: str) -> dict[str, Any]:
     _validate_sheet_name(new_name)
 
     ws.title = new_name
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
-def copy_sheet(path: str, source_sheet: str, target_sheet: str) -> dict[str, Any]:
+def copy_sheet(path: str, source_sheet: str, target_sheet: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
     wb = _load(path)
     source_ws = _ws(wb, source_sheet)
 
@@ -278,11 +340,11 @@ def copy_sheet(path: str, source_sheet: str, target_sheet: str) -> dict[str, Any
 
     new_ws = wb.copy_worksheet(source_ws)
     new_ws.title = target_sheet
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def autofit_columns(
-    path: str, sheet: str, min_width: int = 10, max_width: int = 50, padding: int = 3
+    path: str, sheet: str, min_width: int = 10, max_width: int = 50, padding: int = 3, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
     wb = _load(path)
     ws = _ws(wb, sheet)
@@ -303,11 +365,11 @@ def autofit_columns(
         adjusted_width = min(max_width, max(min_width, max_length + padding))
         ws.column_dimensions[column_letter].width = adjusted_width
 
-    return _finalize(wb, path, recalc=False)
+    return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def clear_range(
-    path: str, sheet: str, cell_range: str, clear_values: bool = True, clear_styles: bool = False
+    path: str, sheet: str, cell_range: str, clear_values: bool = True, clear_styles: bool = False, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
     wb = _load(path)
     ws = _ws(wb, sheet)
@@ -315,7 +377,7 @@ def clear_range(
 
     # Bound coordinates to worksheet used area to prevent DoS / OOM on full-column/row ranges like "A:A"
     if ws.max_row is None or ws.max_column is None:
-        return _finalize(wb, path, recalc=False)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
     min_col = min_col or 1
     min_row = min_row or 1
@@ -323,7 +385,7 @@ def clear_range(
     max_row = min(max_row, ws.max_row) if max_row is not None else ws.max_row
 
     if min_col > max_col or min_row > max_row:
-        return _finalize(wb, path, recalc=False)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
     for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
         for cell in row:
@@ -332,5 +394,5 @@ def clear_range(
             if clear_styles:
                 cell.style = "Normal"
 
-    return _finalize(wb, path, recalc=clear_values)
+    return _finalize(wb, path, recalc=clear_values, backup=backup)
 
