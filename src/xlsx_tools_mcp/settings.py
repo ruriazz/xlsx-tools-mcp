@@ -1,8 +1,11 @@
 import os
 from pathlib import Path
 import re
+import sys
 
 from .errors import FileNotConfiguredError, AccessDeniedError
+
+IS_WINDOWS = sys.platform == "win32"
 
 # Max seconds to wait for the LibreOffice headless recalculation pass.
 SOFFICE_TIMEOUT_SECONDS = int(os.environ.get("XLSX_MCP_RECALC_TIMEOUT", "60"))
@@ -85,6 +88,15 @@ def resolve_path(path: str | None) -> str:
         name = Path(path).name
         if name in CONFIGURED_FILES:
             resolved = CONFIGURED_FILES[name]
+        elif IS_WINDOWS:
+            norm_path = os.path.normcase(path)
+            norm_name = os.path.normcase(name)
+            match = None
+            for k, v in CONFIGURED_FILES.items():
+                if os.path.normcase(k) in (norm_path, norm_name):
+                    match = v
+                    break
+            resolved = match if match is not None else str(Path(path).expanduser().resolve())
         else:
             resolved = str(Path(path).expanduser().resolve())
     

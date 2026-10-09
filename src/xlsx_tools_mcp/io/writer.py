@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import datetime
 import os
 from pathlib import Path
@@ -7,15 +8,17 @@ import re
 import shutil
 import sys
 import time
-from typing import Any
+from typing import Any, Iterator
+import zipfile
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import range_boundaries
+from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from ..errors import FileInUseError, SheetNotFoundError, UnsafeFormulaError
+from ..errors import FileInUseError, InvalidWorkbookError, SheetNotFoundError, UnsafeFormulaError, WorkbookNotFoundError
 from ..locking import safe_replace
 from ..recalc import recalculate
 from .. import settings
@@ -76,7 +79,24 @@ def restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
     return {"restored": True, "target": target_path, "backup": backup_path, "message": "Backup restored successfully."}
 
 def _load(path: str) -> Workbook:
-    return openpyxl.load_workbook(path, data_only=False)
+    p = Path(path)
+    if not p.is_file():
+        raise WorkbookNotFoundError(f"Workbook not found: '{path}'. Use create_workbook to create a new file.")
+    try:
+        return openpyxl.load_workbook(path, data_only=False)
+    except PermissionError:
+        raise
+    except (zipfile.BadZipFile, InvalidFileException) as exc:
+        raise InvalidWorkbookError(f"File '{path}' is not a valid Excel workbook: {exc}") from exc
+
+
+@contextmanager
+def _open_wb(path: str) -> Iterator[Workbook]:
+    wb = _load(path)
+    try:
+        yield wb
+    finally:
+        wb.close()
 
 
 def _ws(wb: Workbook, sheet: str) -> Worksheet:
@@ -141,14 +161,16 @@ def create_workbook(path: str, sheets: list[str] | None = None, overwrite: bool 
         raise FileExistsError(f"File already exists: {path}. Pass overwrite=True to replace it.")
 
     wb = openpyxl.Workbook()
-    names = sheets or ["Sheet1"]
-    wb.active.title = names[0]
-    for name in names[1:]:
-        wb.create_sheet(name)
+    try:
+        names = sheets or ["Sheet1"]
+        wb.active.title = names[0]
+        for name in names[1:]:
+            wb.create_sheet(name)
 
-    p.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_save(wb, path, backup=False)
-    wb.close()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_save(wb, path, backup=False)
+    finally:
+        wb.close()
     return {
         "saved": True,
         "path": str(p),
@@ -170,24 +192,24 @@ def write_cells(
 ) -> dict[str, Any]:
     if not cells:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Nothing to write; file unchanged."}
-    wb = _load(path)
-    if sheet not in wb.sheetnames and create_sheet_if_missing:
-        wb.create_sheet(sheet)
-    ws = _ws(wb, sheet)
+    with _open_wb(path) as wb:
+        if sheet not in wb.sheetnames and create_sheet_if_missing:
+            wb.create_sheet(sheet)
+        ws = _ws(wb, sheet)
 
-    for item in cells:
-        coord = item.get("cell")
-        if not coord:
-            raise ValueError(f"Each item in `cells` requires a 'cell' key, got: {item}")
-        formula = item.get("formula")
-        value = item.get("value")
-        if formula is not None:
-            _validate_formula(formula, allow_external_formulas)
-        elif isinstance(value, str):
-            _validate_formula(value, allow_external_formulas)
-        ws[coord] = formula if formula is not None else value
+        for item in cells:
+            coord = item.get("cell")
+            if not coord:
+                raise ValueError(f"Each item in `cells` requires a 'cell' key, got: {item}")
+            formula = item.get("formula")
+            value = item.get("value")
+            if formula is not None:
+                _validate_formula(formula, allow_external_formulas)
+            elif isinstance(value, str):
+                _validate_formula(value, allow_external_formulas)
+            ws[coord] = formula if formula is not None else value
 
-    return _finalize(wb, path, recalc=recalculate, backup=backup)
+        return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def append_rows(
@@ -201,35 +223,35 @@ def append_rows(
 ) -> dict[str, Any]:
     if not rows:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Nothing to write; file unchanged."}
-    wb = _load(path)
-    if sheet not in wb.sheetnames and create_sheet_if_missing:
-        wb.create_sheet(sheet)
-    ws = _ws(wb, sheet)
+    with _open_wb(path) as wb:
+        if sheet not in wb.sheetnames and create_sheet_if_missing:
+            wb.create_sheet(sheet)
+        ws = _ws(wb, sheet)
 
-    for row in rows:
-        for cell_val in row:
-            if isinstance(cell_val, str):
-                _validate_formula(cell_val, allow_external_formulas)
-        ws.append(row)
+        for row in rows:
+            for cell_val in row:
+                if isinstance(cell_val, str):
+                    _validate_formula(cell_val, allow_external_formulas)
+            ws.append(row)
 
-    return _finalize(wb, path, recalc=recalculate, backup=backup)
+        return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def create_sheet(path: str, sheet: str, index: int | None = None, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
-    wb = _load(path)
-    if sheet in wb.sheetnames:
-        raise ValueError(f"Sheet '{sheet}' already exists")
-    wb.create_sheet(sheet, index)
-    return _finalize(wb, path, recalc=False, backup=backup)
+    with _open_wb(path) as wb:
+        if sheet in wb.sheetnames:
+            raise ValueError(f"Sheet '{sheet}' already exists")
+        wb.create_sheet(sheet, index)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def delete_sheet(path: str, sheet: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
-    wb = _load(path)
-    _ws(wb, sheet)
-    if len(wb.sheetnames) == 1:
-        raise ValueError("Cannot delete the only sheet in a workbook")
-    del wb[sheet]
-    return _finalize(wb, path, recalc=False, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet)
+        if len(wb.sheetnames) == 1:
+            raise ValueError("Cannot delete the only sheet in a workbook")
+        del wb[sheet]
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def insert_rows(
@@ -239,9 +261,9 @@ def insert_rows(
         raise ValueError(f"start_row must be >= 1, got {start_row}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
-    wb = _load(path)
-    _ws(wb, sheet).insert_rows(start_row, count)
-    return _finalize(wb, path, recalc=recalculate, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet).insert_rows(start_row, count)
+        return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def delete_rows(
@@ -251,9 +273,9 @@ def delete_rows(
         raise ValueError(f"start_row must be >= 1, got {start_row}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
-    wb = _load(path)
-    _ws(wb, sheet).delete_rows(start_row, count)
-    return _finalize(wb, path, recalc=recalculate, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet).delete_rows(start_row, count)
+        return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def insert_columns(
@@ -263,9 +285,9 @@ def insert_columns(
         raise ValueError(f"start_column must be >= 1, got {start_column}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
-    wb = _load(path)
-    _ws(wb, sheet).insert_cols(start_column, count)
-    return _finalize(wb, path, recalc=recalculate, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet).insert_cols(start_column, count)
+        return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def delete_columns(
@@ -275,70 +297,70 @@ def delete_columns(
         raise ValueError(f"start_column must be >= 1, got {start_column}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
-    wb = _load(path)
-    _ws(wb, sheet).delete_cols(start_column, count)
-    return _finalize(wb, path, recalc=recalculate, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet).delete_cols(start_column, count)
+        return _finalize(wb, path, recalc=recalculate, backup=backup)
 
 
 def merge_cells(path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
-    wb = _load(path)
-    _ws(wb, sheet).merge_cells(cell_range)
-    return _finalize(wb, path, recalc=False, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet).merge_cells(cell_range)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def unmerge_cells(path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
-    wb = _load(path)
-    _ws(wb, sheet).unmerge_cells(cell_range)
-    return _finalize(wb, path, recalc=False, backup=backup)
+    with _open_wb(path) as wb:
+        _ws(wb, sheet).unmerge_cells(cell_range)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any], backup: bool = AUTO_BACKUP) -> dict[str, Any]:
-    wb = _load(path)
-    ws = _ws(wb, sheet)
-    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
-    min_col = min_col or 1
-    min_row = min_row or 1
-    if max_col is None:
-        max_col = max(ws.max_column or 1, min_col)
-    if max_row is None:
-        max_row = max(ws.max_row or 1, min_row)
+    with _open_wb(path) as wb:
+        ws = _ws(wb, sheet)
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        min_col = min_col or 1
+        min_row = min_row or 1
+        if max_col is None:
+            max_col = max(ws.max_column or 1, min_col)
+        if max_row is None:
+            max_row = max(ws.max_row or 1, min_row)
 
-    font_kwargs = {k: style[k] for k in ("bold", "italic") if k in style}
-    if "font_size" in style:
-        font_kwargs["size"] = style["font_size"]
-    if "font_color" in style:
-        font_kwargs["color"] = style["font_color"]
-    font = Font(**font_kwargs) if font_kwargs else None
+        font_kwargs = {k: style[k] for k in ("bold", "italic") if k in style}
+        if "font_size" in style:
+            font_kwargs["size"] = style["font_size"]
+        if "font_color" in style:
+            font_kwargs["color"] = style["font_color"]
+        font = Font(**font_kwargs) if font_kwargs else None
 
-    fill = None
-    if "bg_color" in style:
-        fill = PatternFill(start_color=style["bg_color"], end_color=style["bg_color"], fill_type="solid")
+        fill = None
+        if "bg_color" in style:
+            fill = PatternFill(start_color=style["bg_color"], end_color=style["bg_color"], fill_type="solid")
 
-    alignment = None
-    if "horizontal" in style or "vertical" in style:
-        alignment = Alignment(horizontal=style.get("horizontal"), vertical=style.get("vertical"))
+        alignment = None
+        if "horizontal" in style or "vertical" in style:
+            alignment = Alignment(horizontal=style.get("horizontal"), vertical=style.get("vertical"))
 
-    border = None
-    if "border" in style:
-        side = Side(style=style["border"])
-        border = Border(left=side, right=side, top=side, bottom=side)
+        border = None
+        if "border" in style:
+            side = Side(style=style["border"])
+            border = Border(left=side, right=side, top=side, bottom=side)
 
-    number_format = style.get("number_format")
+        number_format = style.get("number_format")
 
-    for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
-        for cell in row:
-            if font:
-                cell.font = font
-            if fill:
-                cell.fill = fill
-            if alignment:
-                cell.alignment = alignment
-            if border:
-                cell.border = border
-            if number_format:
-                cell.number_format = number_format
+        for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+            for cell in row:
+                if font:
+                    cell.font = font
+                if fill:
+                    cell.fill = fill
+                if alignment:
+                    cell.alignment = alignment
+                if border:
+                    cell.border = border
+                if number_format:
+                    cell.number_format = number_format
 
-    return _finalize(wb, path, recalc=False, backup=backup)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def _validate_sheet_name(name: str) -> None:
@@ -354,31 +376,31 @@ def rename_sheet(path: str, old_name: str, new_name: str, backup: bool = AUTO_BA
     Note: Renaming a sheet does not automatically rewrite formulas in other sheets
     referencing the old name (openpyxl limitation). Dependent formulas will break.
     """
-    wb = _load(path)
-    ws = _ws(wb, old_name)
+    with _open_wb(path) as wb:
+        ws = _ws(wb, old_name)
 
-    if old_name == new_name:
+        if old_name == new_name:
+            return _finalize(wb, path, recalc=False, backup=backup)
+
+        if new_name in wb.sheetnames:
+            raise ValueError(f"Sheet '{new_name}' already exists")
+        _validate_sheet_name(new_name)
+
+        ws.title = new_name
         return _finalize(wb, path, recalc=False, backup=backup)
-
-    if new_name in wb.sheetnames:
-        raise ValueError(f"Sheet '{new_name}' already exists")
-    _validate_sheet_name(new_name)
-
-    ws.title = new_name
-    return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def copy_sheet(path: str, source_sheet: str, target_sheet: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
-    wb = _load(path)
-    source_ws = _ws(wb, source_sheet)
+    with _open_wb(path) as wb:
+        source_ws = _ws(wb, source_sheet)
 
-    if target_sheet in wb.sheetnames:
-        raise ValueError(f"Sheet '{target_sheet}' already exists")
-    _validate_sheet_name(target_sheet)
+        if target_sheet in wb.sheetnames:
+            raise ValueError(f"Sheet '{target_sheet}' already exists")
+        _validate_sheet_name(target_sheet)
 
-    new_ws = wb.copy_worksheet(source_ws)
-    new_ws.title = target_sheet
-    return _finalize(wb, path, recalc=False, backup=backup)
+        new_ws = wb.copy_worksheet(source_ws)
+        new_ws.title = target_sheet
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def autofit_columns(
@@ -391,55 +413,55 @@ def autofit_columns(
     if min_width > max_width:
         raise ValueError(f"min_width ({min_width}) cannot be greater than max_width ({max_width})")
 
-    wb = _load(path)
-    ws = _ws(wb, sheet)
+    with _open_wb(path) as wb:
+        ws = _ws(wb, sheet)
 
-    for col in ws.columns:
-        if not col:
-            continue
-        max_length = 0
-        column_letter = col[0].column_letter
+        for col in ws.columns:
+            if not col:
+                continue
+            max_length = 0
+            column_letter = col[0].column_letter
 
-        for cell in col:
-            try:
-                if cell.value is not None:
-                    max_length = max(max_length, len(str(cell.value)))
-            except Exception:
-                pass
+            for cell in col:
+                try:
+                    if cell.value is not None:
+                        max_length = max(max_length, len(str(cell.value)))
+                except Exception:
+                    pass
 
-        adjusted_width = min(max_width, max(min_width, max_length + padding))
-        ws.column_dimensions[column_letter].width = adjusted_width
+            adjusted_width = min(max_width, max(min_width, max_length + padding))
+            ws.column_dimensions[column_letter].width = adjusted_width
 
-    return _finalize(wb, path, recalc=False, backup=backup)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def clear_range(
     path: str, sheet: str, cell_range: str, clear_values: bool = True, clear_styles: bool = False, backup: bool = AUTO_BACKUP
 ) -> dict[str, Any]:
-    wb = _load(path)
-    ws = _ws(wb, sheet)
-    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    with _open_wb(path) as wb:
+        ws = _ws(wb, sheet)
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
 
-    # Bound coordinates to worksheet used area to prevent DoS / OOM on full-column/row ranges like "A:A"
-    if ws.max_row is None or ws.max_column is None:
-        return _finalize(wb, path, recalc=False, backup=backup)
+        # Bound coordinates to worksheet used area to prevent DoS / OOM on full-column/row ranges like "A:A"
+        if ws.max_row is None or ws.max_column is None:
+            return _finalize(wb, path, recalc=False, backup=backup)
 
-    min_col = min_col or 1
-    min_row = min_row or 1
-    max_col = min(max_col, ws.max_column) if max_col is not None else ws.max_column
-    max_row = min(max_row, ws.max_row) if max_row is not None else ws.max_row
+        min_col = min_col or 1
+        min_row = min_row or 1
+        max_col = min(max_col, ws.max_column) if max_col is not None else ws.max_column
+        max_row = min(max_row, ws.max_row) if max_row is not None else ws.max_row
 
-    if min_col > max_col or min_row > max_row:
-        return _finalize(wb, path, recalc=False, backup=backup)
+        if min_col > max_col or min_row > max_row:
+            return _finalize(wb, path, recalc=False, backup=backup)
 
-    for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
-        for cell in row:
-            if clear_values:
-                cell.value = None
-            if clear_styles:
-                cell.style = "Normal"
+        for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+            for cell in row:
+                if clear_values:
+                    cell.value = None
+                if clear_styles:
+                    cell.style = "Normal"
 
-    return _finalize(wb, path, recalc=clear_values, backup=backup)
+        return _finalize(wb, path, recalc=clear_values, backup=backup)
 
 
 
@@ -487,52 +509,52 @@ def create_table(
     from openpyxl.worksheet.filters import AutoFilter
 
     _validate_table_name(table_name)
-    wb = _load(path)
-    ws = _ws(wb, sheet)
+    with _open_wb(path) as wb:
+        ws = _ws(wb, sheet)
 
-    for other_ws in wb.worksheets:
-        if table_name in other_ws.tables:
-            raise ValueError(f"Table name '{table_name}' already exists in sheet '{other_ws.title}'")
+        for other_ws in wb.worksheets:
+            if table_name in other_ws.tables:
+                raise ValueError(f"Table name '{table_name}' already exists in sheet '{other_ws.title}'")
 
-    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
-    if min_col is None or min_row is None or max_col is None or max_row is None:
-        raise ValueError(f"Invalid cell_range: {cell_range}")
-    if min_row >= max_row:
-        raise ValueError(f"Table range '{cell_range}' must span at least 2 rows (1 header row and at least 1 data row)")
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        if min_col is None or min_row is None or max_col is None or max_row is None:
+            raise ValueError(f"Invalid cell_range: {cell_range}")
+        if min_row >= max_row:
+            raise ValueError(f"Table range '{cell_range}' must span at least 2 rows (1 header row and at least 1 data row)")
 
-    seen_headers: set[str] = set()
-    for col_idx in range(min_col, max_col + 1):
-        cell_val = ws.cell(row=min_row, column=col_idx).value
-        if cell_val is None or str(cell_val).strip() == "":
-            raise ValueError(
-                f"Table header cell at row {min_row}, column {col_idx} is empty. "
-                "Excel tables require all header cells in the top row to contain non-empty text."
-            )
-        header_str = str(cell_val).strip()
-        if header_str in seen_headers:
-            raise ValueError(
-                f"Duplicate table column header '{header_str}' found at row {min_row}, column {col_idx}. "
-                "Excel tables require unique column header names."
-            )
-        seen_headers.add(header_str)
+        seen_headers: set[str] = set()
+        for col_idx in range(min_col, max_col + 1):
+            cell_val = ws.cell(row=min_row, column=col_idx).value
+            if cell_val is None or str(cell_val).strip() == "":
+                raise ValueError(
+                    f"Table header cell at row {min_row}, column {col_idx} is empty. "
+                    "Excel tables require all header cells in the top row to contain non-empty text."
+                )
+            header_str = str(cell_val).strip()
+            if header_str in seen_headers:
+                raise ValueError(
+                    f"Duplicate table column header '{header_str}' found at row {min_row}, column {col_idx}. "
+                    "Excel tables require unique column header names."
+                )
+            seen_headers.add(header_str)
 
-    tab = Table(displayName=table_name, ref=cell_range)
-    style = TableStyleInfo(
-        name=style_name,
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=show_row_stripes,
-        showColumnStripes=False
-    )
-    tab.tableStyleInfo = style
+        tab = Table(displayName=table_name, ref=cell_range)
+        style = TableStyleInfo(
+            name=style_name,
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=show_row_stripes,
+            showColumnStripes=False
+        )
+        tab.tableStyleInfo = style
 
-    if not show_filter:
-        tab.autoFilter = None
-    else:
-        tab.autoFilter = AutoFilter(ref=cell_range)
+        if not show_filter:
+            tab.autoFilter = None
+        else:
+            tab.autoFilter = AutoFilter(ref=cell_range)
 
-    ws.add_table(tab)
-    return _finalize(wb, path, recalc=False, backup=backup)
+        ws.add_table(tab)
+        return _finalize(wb, path, recalc=False, backup=backup)
 
 
 def create_chart(
@@ -566,37 +588,37 @@ def create_chart(
         raise ValueError(f"Invalid target_cell coordinate: '{target_cell}'. Must be an A1-style reference like 'E2'.")
     target_cell = target_cell.strip().upper()
 
-    wb = _load(path)
-    ws = _ws(wb, sheet)
+    with _open_wb(path) as wb:
+        ws = _ws(wb, sheet)
 
-    chart_map = {
-        "bar": BarChart,
-        "line": LineChart,
-        "pie": PieChart,
-        "scatter": ScatterChart
-    }
+        chart_map = {
+            "bar": BarChart,
+            "line": LineChart,
+            "pie": PieChart,
+            "scatter": ScatterChart
+        }
 
-    if chart_type.lower() not in chart_map:
-        raise ValueError(f"Unsupported chart type: {chart_type}. Supported: bar, line, pie, scatter.")
+        if chart_type.lower() not in chart_map:
+            raise ValueError(f"Unsupported chart type: {chart_type}. Supported: bar, line, pie, scatter.")
 
-    chart = chart_map[chart_type.lower()]()
-    chart.title = title
+        chart = chart_map[chart_type.lower()]()
+        chart.title = title
 
-    d_min_col, d_min_row, d_max_col, d_max_row = range_boundaries(data_range)
-    if any(v is None for v in (d_min_col, d_min_row, d_max_col, d_max_row)):
-        raise ValueError(f"Invalid data_range: {data_range}")
+        d_min_col, d_min_row, d_max_col, d_max_row = range_boundaries(data_range)
+        if any(v is None for v in (d_min_col, d_min_row, d_max_col, d_max_row)):
+            raise ValueError(f"Invalid data_range: {data_range}")
 
-    data = Reference(ws, min_col=d_min_col, min_row=d_min_row, max_col=d_max_col, max_row=d_max_row)
-    chart.add_data(data, titles_from_data=True)
+        data = Reference(ws, min_col=d_min_col, min_row=d_min_row, max_col=d_max_col, max_row=d_max_row)
+        chart.add_data(data, titles_from_data=True)
 
-    if categories_range:
-        c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
-        if any(v is None for v in (c_min_col, c_min_row, c_max_col, c_max_row)):
-            raise ValueError(f"Invalid categories_range: {categories_range}")
-        cats = Reference(ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
-        chart.set_categories(cats)
+        if categories_range:
+            c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
+            if any(v is None for v in (c_min_col, c_min_row, c_max_col, c_max_row)):
+                raise ValueError(f"Invalid categories_range: {categories_range}")
+            cats = Reference(ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
+            chart.set_categories(cats)
 
-    ws.add_chart(chart, target_cell)
+        ws.add_chart(chart, target_cell)
 
-    return _finalize(wb, path, recalc=False, backup=backup)
+        return _finalize(wb, path, recalc=False, backup=backup)
 

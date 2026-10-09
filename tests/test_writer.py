@@ -307,3 +307,82 @@ def test_server_run_translates_permission_error():
         server._run(fail_other_permission)
 
 
+def test_write_cells_non_existent_file_raises_workbook_not_found(tmp_path):
+    from xlsx_tools_mcp.errors import WorkbookNotFoundError
+    missing = str(tmp_path / "missing.xlsx")
+    with pytest.raises(WorkbookNotFoundError, match="Use create_workbook to create a new file"):
+        writer.write_cells(missing, "Sheet1", [{"cell": "A1", "value": 1}])
+
+
+def test_write_cells_corrupted_file_raises_invalid_workbook_error(tmp_path):
+    from xlsx_tools_mcp.errors import InvalidWorkbookError
+    corrupt = tmp_path / "corrupt.xlsx"
+    corrupt.write_text("corrupted content")
+    with pytest.raises(InvalidWorkbookError):
+        writer.write_cells(str(corrupt), "Sheet1", [{"cell": "A1", "value": 1}])
+
+
+def test_server_handles_missing_and_corrupt_files(tmp_path):
+    from xlsx_tools_mcp import server
+    missing = str(tmp_path / "missing.xlsx")
+    with pytest.raises(ValueError, match="Workbook not found"):
+        server.read_sheet("Sheet1", path=missing)
+    with pytest.raises(ValueError, match="Workbook not found.*Use create_workbook"):
+        server.write_cells("Sheet1", [{"cell": "A1", "value": 1}], path=missing)
+
+    corrupt = tmp_path / "corrupt.xlsx"
+    corrupt.write_text("not excel")
+    with pytest.raises(ValueError, match="not a valid"):
+        server.read_sheet("Sheet1", path=str(corrupt))
+    with pytest.raises(ValueError, match="not a valid"):
+        server.write_cells("Sheet1", [{"cell": "A1", "value": 1}], path=str(corrupt))
+
+
+def test_load_permission_error_not_masked(monkeypatch, tmp_path):
+    from xlsx_tools_mcp import server
+    p = tmp_path / "test.xlsx"
+    wb = openpyxl.Workbook()
+    wb.save(p)
+    wb.close()
+
+    def mock_load(*args, **kwargs):
+        exc = PermissionError("Locked by antivirus")
+        exc.winerror = 32
+        raise exc
+
+    monkeypatch.setattr("openpyxl.load_workbook", mock_load)
+    with pytest.raises(PermissionError):
+        writer._load(str(p))
+
+    # And verify server._run converts winerror 32 into clear lock message, NOT "invalid excel"
+    with pytest.raises(ValueError, match="locked by another application"):
+        server.write_cells("Sheet", [{"cell": "A1", "value": 1}], path=str(p))
+
+
+def test_writer_closes_workbook_on_domain_error(tmp_path):
+    from xlsx_tools_mcp.errors import SheetNotFoundError
+    p = tmp_path / "test.xlsx"
+    wb = openpyxl.Workbook()
+    wb.save(p)
+    wb.close()
+
+    closed = False
+    orig_close = openpyxl.workbook.workbook.Workbook.close
+
+    def tracking_close(self):
+        nonlocal closed
+        closed = True
+        return orig_close(self)
+
+    openpyxl.workbook.workbook.Workbook.close = tracking_close
+    try:
+        with pytest.raises(SheetNotFoundError):
+            writer.write_cells(str(p), "NonExistentSheet", [{"cell": "A1", "value": 1}])
+        assert closed is True
+    finally:
+        openpyxl.workbook.workbook.Workbook.close = orig_close
+
+
+
+
+

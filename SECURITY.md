@@ -12,22 +12,39 @@ proof-of-concept is sufficient.
 
 ## Scope
 
-This tool can **read and write arbitrary files on the machine it runs on**, at the
-paths the calling agent/user points it at. It is a capability of the tool, not a
-vulnerability in it — but treat it accordingly:
+By default in local mode, this server can read and write files accessible to the host
+process. For autonomous agent setups or production deployments, built-in security
+controls allow strict containment:
 
-- Run the server **only against files you trust** and with least-privilege accounts.
-- Do not expose it to untrusted agents with unrestricted filesystem access.
-- A set of workbook files can be whitelisted/aliased via `XLSX_MCP_FILES` for
-  controlled, path-free access.
+- **Path Confinement** — set `XLSX_MCP_ALLOWED_DIRS` to restrict read and write
+  operations to specific directories. Any access outside these boundaries (or via
+  symlink traversal) is rejected with `AccessDeniedError`.
+- **Preloaded Workbooks** — set `XLSX_MCP_FILES` to alias specific workbooks for
+  path-free access, preventing client agents from manipulating file paths.
+- **Run with least-privilege** — execute the server under dedicated user accounts
+  with restricted filesystem permissions.
 
 ## Built-in protections
 
-- **XML-bomb protection** — the `defusedxml` dependency is auto-detected by
-  openpyxl, which uses its hardened XML parser to prevent entity-expansion
-  (billion-laughs-style) attacks from hostile `.xlsx` files.
-- **Concurrency safety** — per-file locking via `filelock` (a sibling `<path>.lock`)
-  serializes concurrent read/write access so writes cannot interleave and corrupt
-  a workbook.
-- **Atomic writes** — saves go to a temp file and are swapped in with `os.replace`,
-  so an interrupted write never leaves a file half-written.
+- **Path confinement & traversal defense** — `resolve_path()` resolves real symlinks
+  and verifies paths against `XLSX_MCP_ALLOWED_DIRS` using platform-appropriate
+  comparisons (`os.path.normcase` for Windows case-insensitivity, cross-drive checks).
+- **Formula injection & DDE guard** — write operations (`write_cells`, formulas)
+  strictly inspect content starting with `=`, `+`, `-`, `@`, or containing DDE pipe syntax (`|`).
+  Potentially dangerous functions (`WEBSERVICE`, `HYPERLINK`, `INDIRECT`, `RTD`,
+  `CALL`, `REGISTER`) are rejected with `UnsafeFormulaError` unless explicitly permitted
+  with `allow_external_formulas=True`.
+- **Query expression sandboxing** — `query_sheet` uses an AST validator (`SafeQueryValidator`)
+  that restricts pandas queries to safe comparison and logical expressions, blocking
+  arbitrary Python code execution, built-in access, and method invocations.
+- **Auto-backup & atomic rollback** — write mutations can create `.bak` snapshots
+  prior to mutation (`backup=True` or `XLSX_MCP_AUTO_BACKUP`), with atomic rollback
+  available via `restore_backup`.
+- **Safe atomic replacement & lock resilience** — saves are staged in temporary files
+  and swapped atomically via `safe_replace()` with exponential backoff retry for
+  transient locks (e.g. Windows Defender scans or file indexers), and clean
+  `FileInUseError` signaling if a file is permanently locked by another application.
+- **XML-bomb protection** — `defusedxml` is integrated with openpyxl's XML parser
+  to prevent entity-expansion (billion-laughs) denial-of-service from hostile spreadsheets.
+- **Concurrency serialization** — per-file locking via `filelock` (sibling `<path>.lock`)
+  serializes concurrent read/write operations to prevent file corruption.
