@@ -213,7 +213,7 @@ def test_formula_injection_guard(clean_wb):
 
 
 def test_auto_backup_and_restore(clean_wb):
-    server.write_cells("Main", [{"cell": "A1", "value": "Original"}], path=clean_wb)
+    server.write_cells("Main", [{"cell": "A1", "value": "Original"}], backup=False, path=clean_wb)
 
     # Backup on write
     server.write_cells("Main", [{"cell": "A1", "value": "Mutated"}], backup=True, path=clean_wb)
