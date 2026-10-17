@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.2] — 2026-10-17
+
+### Fixed
+- **Windows In-Place Recalculation Collision**: In `recalculate()`, route LibreOffice `--outdir` into a dedicated `out/` subdirectory within the temporary working directory instead of the input directory. Prevents Windows file sharing / in-place overwrite errors (`0x4c0c`, `Code:12`) when evaluating formulas (#10).
+
 ## [0.3.1] — 2026-10-04
 
 ### Added
