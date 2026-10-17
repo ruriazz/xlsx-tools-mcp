@@ -100,6 +100,9 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
         tmp_input = Path(tmpdir) / src.name
         shutil.copy(src, tmp_input)
 
+        out_dir = Path(tmpdir) / "out"
+        out_dir.mkdir(exist_ok=True)
+
         profile_dir = Path(tmpdir) / "lo_profile"
         cmd = [
             soffice,
@@ -109,7 +112,7 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
             f"-env:UserInstallation={profile_dir.as_uri()}",
             "--infilter=Calc MS Excel 2007 XML",
             "--convert-to", "xlsx",
-            "--outdir", tmpdir,
+            "--outdir", str(out_dir),
             str(tmp_input),
         ]
 
@@ -132,7 +135,7 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
                 message=f"LibreOffice exited with code {proc.returncode}: {stderr}",
             )
 
-        tmp_output = Path(tmpdir) / f"{tmp_input.stem}.xlsx"
+        tmp_output = out_dir / f"{tmp_input.stem}.xlsx"
         if not tmp_output.is_file():
             return RecalcResult(
                 success=False,

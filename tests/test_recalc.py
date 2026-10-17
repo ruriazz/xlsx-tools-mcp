@@ -181,4 +181,29 @@ def test_recalculate_path_with_spaces(tmp_path, monkeypatch):
     cmd = captured_cmds[0]
     profile_arg = [arg for arg in cmd if arg.startswith("-env:UserInstallation=")][0]
     assert profile_arg.startswith("-env:UserInstallation=file://")
-    assert str(Path(cmd[-1])) == str(Path(cmd[cmd.index("--outdir") + 1]) / "Report 2026.xlsx")
+    outdir = Path(cmd[cmd.index("--outdir") + 1])
+    input_file = Path(cmd[-1])
+    assert input_file.name == "Report 2026.xlsx"
+    assert outdir.name == "out"
+    assert input_file.parent == outdir.parent
+
+
+def test_recalculate_outdir_separate_from_input_dir(workbook_path, monkeypatch):
+    """Verify --outdir is distinct from input file directory to prevent Windows file lock error (#10)."""
+    captured_calls = []
+
+    def mock_run(cmd, capture_output=False, timeout=None, **kwargs):
+        captured_calls.append(cmd)
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        src = Path(cmd[-1])
+        assert outdir != src.parent, (
+            f"--outdir ({outdir}) must not equal input directory ({src.parent})"
+        )
+        shutil.copy(workbook_path, outdir / f"{src.stem}.xlsx")
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(recalc, "find_soffice", lambda: "/fake/soffice")
+    monkeypatch.setattr(recalc.subprocess, "run", mock_run)
+
+    result = recalc.recalculate(workbook_path)
+    assert result.success is True
