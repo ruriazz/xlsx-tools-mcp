@@ -65,6 +65,7 @@ def test_success_output_created(workbook_path, monkeypatch):
 
 
 def test_scan_formula_errors_roundtrips(workbook_path, monkeypatch):
+    # roundtrip mode scans the LibreOffice export; inject mode is covered in test_inject.py
     def make_output(outdir, src):
         shutil.copy(workbook_path, outdir / f"{src.stem}.xlsx")
 
@@ -74,7 +75,7 @@ def test_scan_formula_errors_roundtrips(workbook_path, monkeypatch):
         recalc, "scan_formula_errors", lambda _: [{"sheet": "Data", "cell": "A1", "error": "#DIV/0!"}]
     )
 
-    result = recalc.recalculate(workbook_path)
+    result = recalc.recalculate(workbook_path, mode="roundtrip")
     assert result.success is True
     assert result.errors_found == [{"sheet": "Data", "cell": "A1", "error": "#DIV/0!"}]
 

@@ -13,15 +13,17 @@ import zipfile
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import range_boundaries
+from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.workbook.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from ..errors import FileInUseError, InvalidWorkbookError, SheetNotFoundError, UnsafeFormulaError, WorkbookNotFoundError
+from ..context import WriteContext
+from ..errors import FileInUseError, InvalidWorkbookError, XlsxMcpError, SheetNotFoundError, UnsafeFormulaError, WorkbookNotFoundError
+from ..guard import WriteGuard
 from ..locking import safe_replace
 from ..recalc import recalculate
-from .. import settings
+from .. import inject, ledger, rules, settings
 from ..settings import AUTO_BACKUP, BACKUP_DIR
 
 _safe_replace = safe_replace
@@ -100,6 +102,7 @@ def _open_wb(path: str) -> Iterator[Workbook]:
 
 
 def _ws(wb: Workbook, sheet: str) -> Worksheet:
+    ledger.assert_not_reserved(sheet)
     if sheet not in wb.sheetnames:
         raise SheetNotFoundError(f"Sheet '{sheet}' not found. Available: {wb.sheetnames}")
     return wb[sheet]
@@ -127,30 +130,83 @@ def _atomic_save(wb: Workbook, path: str, backup: bool = False) -> None:
                 pass
 
 
-def _finalize(wb: Workbook, path: str, recalc: bool = True, backup: bool = False) -> dict[str, Any]:
+def _finalize(
+    wb: Workbook, path: str, recalc: bool = True, backup: bool = False, ctx: WriteContext | None = None
+) -> dict[str, Any]:
     """Save via openpyxl (preserves everything it didn't touch), then recalculate.
 
-    `recalc=False` skips the LibreOffice round-trip for structural edits (merge,
-    style, sheet add/remove) that can't produce a stale formula result — recalc is
-    still cheap to run for anything that touches cell values or formulas.
-    """
-    try:
-        _atomic_save(wb, path, backup=backup)
-    finally:
-        wb.close()
-    if not recalc:
-        return {"saved": True, "recalculated": False, "errors_found": [], "message": "Saved (no recalculation needed)."}
+    `recalc=False` skips the LibreOffice pass for structural edits (merge, style,
+    sheet add/remove) that can't produce a stale formula result.
 
-    result = recalculate(path)
-    return {
-        "saved": True,
-        "recalculated": result.success,
-        "errors_found": result.errors_found,
-        "message": result.message,
-    }
+    Around the save, a WriteGuard evaluates the workbook's rules (rolling the write
+    back on a regression), reports ripple effects, and the opt-in change log is
+    appended in the same save. Without rules, ripple or change log, this is the
+    v0.3.x save + recalculate sequence.
+    """
+    ctx = ctx or WriteContext(tool="write")
+    guard = WriteGuard(path, ctx, recalc_requested=recalc)
+    try:
+        guard.prepare()
+        kept = _read_cached_values(path) if ctx.preserves_values and not recalc else None
+        ledger.append(wb, ctx)
+        guard.file_modified = True
+        try:
+            _atomic_save(wb, path, backup=backup)
+        finally:
+            wb.close()
+        if kept is not None:
+            _restore_cached_values(path, kept)
+        if not recalc:
+            result: dict[str, Any] = {
+                "saved": True, "recalculated": False, "errors_found": [], "message": "Saved (no recalculation needed)."
+            }
+        else:
+            rr = recalculate(path)
+            result = {
+                "saved": True,
+                "recalculated": rr.success,
+                "errors_found": rr.errors_found,
+                "message": rr.message,
+                "recalc_mode": rr.mode,
+            }
+        guard.finish(result)
+        return result
+    except BaseException as exc:
+        problem = guard.abort()
+        if problem:
+            raise XlsxMcpError(f"{exc} — {problem}") from exc
+        raise
+    finally:
+        guard.cleanup()
+
+
+def _read_cached_values(path: str) -> dict[str, inject.SheetValues] | None:
+    try:
+        return inject.read_cached_values(path)
+    except Exception:  # best effort: without them the save behaves like v0.3.x
+        return None
+
+
+def _restore_cached_values(path: str, values: dict[str, inject.SheetValues]) -> None:
+    """Put back formula results an openpyxl save emptied, for edits that change no values."""
+    if not any(values.values()):
+        return
+    try:
+        inject.inject_cached_values(path, values, path)
+    except Exception:  # best effort: the file stays exactly as openpyxl saved it
+        pass
 
 
 _EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
+
+
+def _row_span(start: int, count: int) -> str:
+    return f"{start}:{min(start + count - 1, 1_048_576)}"
+
+
+def _col_span(start: int, count: int) -> str:
+    last = min(start + count - 1, 16_384)
+    return f"{get_column_letter(min(start, 16_384))}:{get_column_letter(last)}"
 
 
 def create_workbook(path: str, sheets: list[str] | None = None, overwrite: bool = False) -> dict[str, Any]:
@@ -159,10 +215,13 @@ def create_workbook(path: str, sheets: list[str] | None = None, overwrite: bool 
         raise ValueError(f"Refusing to write to a non-Excel file: {path}. Use a .xlsx/.xlsm path.")
     if p.exists() and not overwrite:
         raise FileExistsError(f"File already exists: {path}. Pass overwrite=True to replace it.")
+    if p.exists():
+        rules.load_ruleset(path)  # a corrupt rules file blocks writes, overwrite included
 
+    names = sheets or ["Sheet1"]
+    ledger.assert_not_reserved(*names)
     wb = openpyxl.Workbook()
     try:
-        names = sheets or ["Sheet1"]
         wb.active.title = names[0]
         for name in names[1:]:
             wb.create_sheet(name)
@@ -189,10 +248,13 @@ def write_cells(
     recalculate: bool = True,
     allow_external_formulas: bool = False,
     backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if not cells:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Nothing to write; file unchanged."}
+    ctx = WriteContext(tool="write_cells", changes_values=True, reason=reason)
     with _open_wb(path) as wb:
+        ledger.assert_not_reserved(sheet)
         if sheet not in wb.sheetnames and create_sheet_if_missing:
             wb.create_sheet(sheet)
         ws = _ws(wb, sheet)
@@ -207,9 +269,13 @@ def write_cells(
                 _validate_formula(formula, allow_external_formulas)
             elif isinstance(value, str):
                 _validate_formula(value, allow_external_formulas)
-            ws[coord] = formula if formula is not None else value
+            new_value = formula if formula is not None else value
+            target = ws[coord]
+            before = target.value
+            target.value = new_value
+            ctx.record(sheet, target.coordinate, before, new_value)
 
-        return _finalize(wb, path, recalc=recalculate, backup=backup)
+        return _finalize(wb, path, recalc=recalculate, backup=backup, ctx=ctx)
 
 
 def append_rows(
@@ -220,10 +286,13 @@ def append_rows(
     recalculate: bool = True,
     allow_external_formulas: bool = False,
     backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if not rows:
         return {"saved": True, "recalculated": False, "errors_found": [], "message": "Nothing to write; file unchanged."}
+    ctx = WriteContext(tool="append_rows", changes_values=True, reason=reason)
     with _open_wb(path) as wb:
+        ledger.assert_not_reserved(sheet)
         if sheet not in wb.sheetnames and create_sheet_if_missing:
             wb.create_sheet(sheet)
         ws = _ws(wb, sheet)
@@ -232,89 +301,152 @@ def append_rows(
             for cell_val in row:
                 if isinstance(cell_val, str):
                     _validate_formula(cell_val, allow_external_formulas)
+        for row in rows:
             ws.append(row)
+            if not row:
+                continue
+            # ws.append writes at the new last row; record what landed there.
+            row_idx = ws.max_row
+            for col_idx, cell_val in enumerate(row, start=1):
+                if cell_val is not None:
+                    ctx.record(sheet, f"{get_column_letter(col_idx)}{row_idx}", None, cell_val)
 
-        return _finalize(wb, path, recalc=recalculate, backup=backup)
+        return _finalize(wb, path, recalc=recalculate, backup=backup, ctx=ctx)
 
 
-def create_sheet(path: str, sheet: str, index: int | None = None, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def create_sheet(
+    path: str, sheet: str, index: int | None = None, backup: bool = AUTO_BACKUP, reason: str | None = None
+) -> dict[str, Any]:
+    ledger.assert_not_reserved(sheet)
+    ctx = WriteContext(tool="create_sheet", preserves_values=True, reason=reason)
     with _open_wb(path) as wb:
         if sheet in wb.sheetnames:
             raise ValueError(f"Sheet '{sheet}' already exists")
         wb.create_sheet(sheet, index)
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(sheet, "")
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
-def delete_sheet(path: str, sheet: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def delete_sheet(path: str, sheet: str, backup: bool = AUTO_BACKUP, reason: str | None = None) -> dict[str, Any]:
+    ctx = WriteContext(tool="delete_sheet", structural=True, changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet)
-        if len(wb.sheetnames) == 1:
+        if len(ledger.visible_names(wb.sheetnames)) == 1:
             raise ValueError("Cannot delete the only sheet in a workbook")
         del wb[sheet]
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(sheet, "")
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
 def insert_rows(
-    path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
+    path: str,
+    sheet: str,
+    start_row: int,
+    count: int = 1,
+    recalculate: bool = True,
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if start_row < 1:
         raise ValueError(f"start_row must be >= 1, got {start_row}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
+    ctx = WriteContext(tool="insert_rows", structural=True, changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet).insert_rows(start_row, count)
-        return _finalize(wb, path, recalc=recalculate, backup=backup)
+        ctx.note(sheet, _row_span(start_row, count))
+        return _finalize(wb, path, recalc=recalculate, backup=backup, ctx=ctx)
 
 
 def delete_rows(
-    path: str, sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
+    path: str,
+    sheet: str,
+    start_row: int,
+    count: int = 1,
+    recalculate: bool = True,
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if start_row < 1:
         raise ValueError(f"start_row must be >= 1, got {start_row}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
+    ctx = WriteContext(tool="delete_rows", structural=True, changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet).delete_rows(start_row, count)
-        return _finalize(wb, path, recalc=recalculate, backup=backup)
+        ctx.note(sheet, _row_span(start_row, count))
+        return _finalize(wb, path, recalc=recalculate, backup=backup, ctx=ctx)
 
 
 def insert_columns(
-    path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
+    path: str,
+    sheet: str,
+    start_column: int,
+    count: int = 1,
+    recalculate: bool = True,
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if start_column < 1:
         raise ValueError(f"start_column must be >= 1, got {start_column}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
+    ctx = WriteContext(tool="insert_columns", structural=True, changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet).insert_cols(start_column, count)
-        return _finalize(wb, path, recalc=recalculate, backup=backup)
+        ctx.note(sheet, _col_span(start_column, count))
+        return _finalize(wb, path, recalc=recalculate, backup=backup, ctx=ctx)
 
 
 def delete_columns(
-    path: str, sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool = AUTO_BACKUP
+    path: str,
+    sheet: str,
+    start_column: int,
+    count: int = 1,
+    recalculate: bool = True,
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if start_column < 1:
         raise ValueError(f"start_column must be >= 1, got {start_column}")
     if count < 1:
         raise ValueError(f"count must be >= 1, got {count}")
+    ctx = WriteContext(tool="delete_columns", structural=True, changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet).delete_cols(start_column, count)
-        return _finalize(wb, path, recalc=recalculate, backup=backup)
+        ctx.note(sheet, _col_span(start_column, count))
+        return _finalize(wb, path, recalc=recalculate, backup=backup, ctx=ctx)
 
 
-def merge_cells(path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def merge_cells(
+    path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP, reason: str | None = None
+) -> dict[str, Any]:
+    ctx = WriteContext(tool="merge_cells", changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet).merge_cells(cell_range)
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(sheet, cell_range)
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
-def unmerge_cells(path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def unmerge_cells(
+    path: str, sheet: str, cell_range: str, backup: bool = AUTO_BACKUP, reason: str | None = None
+) -> dict[str, Any]:
+    ctx = WriteContext(tool="unmerge_cells", preserves_values=True, reason=reason)
     with _open_wb(path) as wb:
         _ws(wb, sheet).unmerge_cells(cell_range)
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(sheet, cell_range)
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
-def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any], backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def set_cell_style(
+    path: str,
+    sheet: str,
+    cell_range: str,
+    style: dict[str, Any],
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    ctx = WriteContext(tool="set_cell_style", preserves_values=True, reason=reason)
     with _open_wb(path) as wb:
         ws = _ws(wb, sheet)
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
@@ -360,37 +492,48 @@ def set_cell_style(path: str, sheet: str, cell_range: str, style: dict[str, Any]
                 if number_format:
                     cell.number_format = number_format
 
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(sheet, cell_range)
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
 def _validate_sheet_name(name: str) -> None:
+    ledger.assert_not_reserved(name)
     if not name or len(name) > 31:
         raise ValueError("Sheet name must be 1-31 characters long")
     if any(c in name for c in r"\/?*[]:"):
         raise ValueError(r"Sheet name cannot contain \ / ? * : [ ]")
 
 
-def rename_sheet(path: str, old_name: str, new_name: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def rename_sheet(
+    path: str, old_name: str, new_name: str, backup: bool = AUTO_BACKUP, reason: str | None = None
+) -> dict[str, Any]:
     """Rename an existing sheet.
 
     Note: Renaming a sheet does not automatically rewrite formulas in other sheets
     referencing the old name (openpyxl limitation). Dependent formulas will break.
     """
+    ledger.assert_not_reserved(old_name, new_name)
+    ctx = WriteContext(tool="rename_sheet", structural=True, changes_values=True, reason=reason)
     with _open_wb(path) as wb:
         ws = _ws(wb, old_name)
 
         if old_name == new_name:
-            return _finalize(wb, path, recalc=False, backup=backup)
+            return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
         if new_name in wb.sheetnames:
             raise ValueError(f"Sheet '{new_name}' already exists")
         _validate_sheet_name(new_name)
 
         ws.title = new_name
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(new_name, f"(renamed from '{old_name}')")
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
-def copy_sheet(path: str, source_sheet: str, target_sheet: str, backup: bool = AUTO_BACKUP) -> dict[str, Any]:
+def copy_sheet(
+    path: str, source_sheet: str, target_sheet: str, backup: bool = AUTO_BACKUP, reason: str | None = None
+) -> dict[str, Any]:
+    ledger.assert_not_reserved(source_sheet, target_sheet)
+    ctx = WriteContext(tool="copy_sheet", preserves_values=True, reason=reason)
     with _open_wb(path) as wb:
         source_ws = _ws(wb, source_sheet)
 
@@ -400,11 +543,18 @@ def copy_sheet(path: str, source_sheet: str, target_sheet: str, backup: bool = A
 
         new_ws = wb.copy_worksheet(source_ws)
         new_ws.title = target_sheet
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx.note(target_sheet, f"(copied from '{source_sheet}')")
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
 def autofit_columns(
-    path: str, sheet: str, min_width: int = 10, max_width: int = 50, padding: int = 3, backup: bool = AUTO_BACKUP
+    path: str,
+    sheet: str,
+    min_width: int = 10,
+    max_width: int = 50,
+    padding: int = 3,
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     if min_width < 0:
         raise ValueError(f"min_width must be non-negative, got {min_width}")
@@ -432,19 +582,29 @@ def autofit_columns(
             adjusted_width = min(max_width, max(min_width, max_length + padding))
             ws.column_dimensions[column_letter].width = adjusted_width
 
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx = WriteContext(tool="autofit_columns", preserves_values=True, reason=reason)
+        ctx.note(sheet, "")
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
 def clear_range(
-    path: str, sheet: str, cell_range: str, clear_values: bool = True, clear_styles: bool = False, backup: bool = AUTO_BACKUP
+    path: str,
+    sheet: str,
+    cell_range: str,
+    clear_values: bool = True,
+    clear_styles: bool = False,
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
+    ctx = WriteContext(tool="clear_range", changes_values=clear_values, reason=reason)
     with _open_wb(path) as wb:
         ws = _ws(wb, sheet)
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        ctx.note(sheet, cell_range)
 
         # Bound coordinates to worksheet used area to prevent DoS / OOM on full-column/row ranges like "A:A"
         if ws.max_row is None or ws.max_column is None:
-            return _finalize(wb, path, recalc=False, backup=backup)
+            return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
         min_col = min_col or 1
         min_row = min_row or 1
@@ -452,16 +612,18 @@ def clear_range(
         max_row = min(max_row, ws.max_row) if max_row is not None else ws.max_row
 
         if min_col > max_col or min_row > max_row:
-            return _finalize(wb, path, recalc=False, backup=backup)
+            return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
         for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
             for cell in row:
                 if clear_values:
+                    if cell.value is not None:
+                        ctx.record(sheet, cell.coordinate, cell.value, None)
                     cell.value = None
                 if clear_styles:
                     cell.style = "Normal"
 
-        return _finalize(wb, path, recalc=clear_values, backup=backup)
+        return _finalize(wb, path, recalc=clear_values, backup=backup, ctx=ctx)
 
 
 
@@ -488,7 +650,8 @@ def create_table(
     style_name: str = "TableStyleMedium9",
     show_filter: bool = True,
     show_row_stripes: bool = True,
-    backup: bool = AUTO_BACKUP
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Create a formal Excel Table on the specified range.
 
@@ -554,7 +717,9 @@ def create_table(
             tab.autoFilter = AutoFilter(ref=cell_range)
 
         ws.add_table(tab)
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx = WriteContext(tool="create_table", preserves_values=True, reason=reason)
+        ctx.note(sheet, cell_range)
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 
 
 def create_chart(
@@ -565,7 +730,8 @@ def create_chart(
     categories_range: str | None = None,
     title: str = "Chart",
     target_cell: str = "E2",
-    backup: bool = AUTO_BACKUP
+    backup: bool = AUTO_BACKUP,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     """Create a native Excel chart (bar, line, pie, scatter).
 
@@ -620,5 +786,7 @@ def create_chart(
 
         ws.add_chart(chart, target_cell)
 
-        return _finalize(wb, path, recalc=False, backup=backup)
+        ctx = WriteContext(tool="create_chart", preserves_values=True, reason=reason)
+        ctx.note(sheet, target_cell)
+        return _finalize(wb, path, recalc=False, backup=backup, ctx=ctx)
 

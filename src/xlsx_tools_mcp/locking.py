@@ -1,6 +1,6 @@
 import os
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -26,6 +26,22 @@ def file_lock(path: str | Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterat
             f"Timed out after {timeout}s waiting for a lock on {path}. "
             "Another operation may be in progress."
         ) from exc
+
+
+@contextmanager
+def file_locks(*paths: str | Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """Lock several files at once, always in the same (normalized path) order.
+
+    A fixed acquisition order means two calls locking the same pair of files can
+    never deadlock waiting on each other.
+    """
+    unique: dict[str, str | Path] = {}
+    for p in paths:
+        unique.setdefault(os.path.normcase(os.path.abspath(str(p))), p)
+    with ExitStack() as stack:
+        for key in sorted(unique):
+            stack.enter_context(file_lock(unique[key], timeout))
+        yield
 
 
 def safe_replace(src: str | Path, dst: str | Path, max_attempts: int = 4, delay: float = 0.05) -> None:

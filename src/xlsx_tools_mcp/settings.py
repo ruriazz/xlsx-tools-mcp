@@ -16,6 +16,59 @@ LOCK_TIMEOUT_SECONDS = float(os.environ.get("XLSX_MCP_LOCK_TIMEOUT", "10"))
 AUTO_BACKUP = os.environ.get("XLSX_MCP_AUTO_BACKUP", "true").lower() in ("1", "true", "yes")
 BACKUP_DIR = str(Path(os.environ["XLSX_MCP_BACKUP_DIR"]).expanduser().resolve()) if os.environ.get("XLSX_MCP_BACKUP_DIR") else ""
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be true or false, got {raw!r}")
+
+
+def _env_int(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
+
+
+RECALC_MODES = ("inject", "roundtrip")
+
+
+def parse_recalc_mode(raw: str) -> str:
+    mode = raw.strip().lower() or "inject"
+    if mode not in RECALC_MODES:
+        raise ValueError(f"XLSX_MCP_RECALC_MODE must be one of {RECALC_MODES}, got {raw!r}")
+    return mode
+
+
+# How formula results are written back after the LibreOffice pass:
+# "inject" copies only computed values into the original file; "roundtrip" replaces
+# the file with LibreOffice's own export (v0.3.x behavior).
+RECALC_MODE = parse_recalc_mode(os.environ.get("XLSX_MCP_RECALC_MODE", "inject"))
+
+# Upper bound on the uncompressed size of a single XML part parsed by the server.
+MAX_PART_BYTES = _env_int("XLSX_MCP_MAX_PART_BYTES", 256 * 1024 * 1024, minimum=1)
+
+# Report which formula results changed as a side effect of a write.
+RIPPLE_ENABLED = _env_bool("XLSX_MCP_RIPPLE", True)
+RIPPLE_MAX_CELLS = _env_int("XLSX_MCP_RIPPLE_MAX_CELLS", 200_000, minimum=0)
+
+# Opt-in change log stored inside the workbook on a very hidden sheet.
+CHANGE_LOG_ENABLED = _env_bool("XLSX_MCP_CHANGE_LOG", False)
+CHANGE_LOG_MAX_ROWS = _env_int("XLSX_MCP_CHANGE_LOG_MAX_ROWS", 10_000, minimum=1)
+CHANGE_LOG_MAX_CELLS_PER_OP = _env_int("XLSX_MCP_CHANGE_LOG_MAX_CELLS_PER_OP", 500, minimum=1)
+
+
 def _split_env_list(raw: str) -> list[str]:
     return [entry.strip() for entry in re.split(r"[,;]", raw) if entry.strip()]
 
@@ -61,6 +114,15 @@ def _check_allowed(resolved_path: str) -> str:
             # Raised when paths are on different drives on Windows (e.g. C: vs D:)
             pass
     raise AccessDeniedError(f"Access denied: Path {resolved_path} is outside allowed directories.")
+
+def resolve_literal_path(path: str) -> str:
+    """Resolve a path exactly as given (no preloaded-alias lookup), then confine it.
+
+    Used for files a tool *creates* or compares against, so an output name that
+    happens to match a preloaded file's alias can never redirect to that file.
+    """
+    return _check_allowed(str(Path(path).expanduser().resolve()))
+
 
 def resolve_path(path: str | None) -> str:
     """Resolve a tool's `path` argument against the preconfigured file set.

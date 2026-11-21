@@ -10,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
+from lxml import etree
 
-from .errors import FileInUseError
+from . import inject, settings
+from .errors import FileInUseError, XlsxMcpError
 from .locking import safe_replace
 from .settings import SOFFICE_TIMEOUT_SECONDS
 
@@ -26,6 +28,8 @@ class RecalcResult:
     success: bool
     errors_found: list[dict[str, Any]] = field(default_factory=list)
     message: str = ""
+    mode: str = ""
+    stats: dict[str, Any] | None = None
 
 
 def find_soffice() -> str | None:
@@ -75,19 +79,62 @@ def scan_formula_errors(path: str) -> list[dict[str, Any]]:
         wb.close()
 
 
-def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResult:
-    """Recalculate every formula in an xlsx file via a LibreOffice headless round-trip.
+def _inject_from(src: Path, lo_output: Path) -> RecalcResult:
+    """Copy LibreOffice's computed formula values into `src`, leaving all else untouched."""
+    try:
+        values = inject.read_cached_values(lo_output)
+        stats = inject.inject_cached_values(src, values, src)
+    except FileInUseError:
+        return RecalcResult(
+            success=False,
+            mode="inject",
+            message=f"LibreOffice recalculated formulas, but could not overwrite '{src}' because it is locked by another application.",
+        )
+    except PermissionError as exc:
+        return RecalcResult(
+            success=False,
+            mode="inject",
+            message=f"LibreOffice recalculated formulas, but permission was denied when overwriting '{src}': {exc}",
+        )
+    except (XlsxMcpError, etree.LxmlError, OSError, ValueError) as exc:
+        return RecalcResult(
+            success=False,
+            mode="inject",
+            message=(
+                f"LibreOffice computed the formulas, but the values could not be written back ({exc}). "
+                "The file was left as saved. Set XLSX_MCP_RECALC_MODE=roundtrip to use LibreOffice's "
+                "own export instead."
+            ),
+        )
+    return RecalcResult(
+        success=True,
+        errors_found=stats.errors,
+        mode="inject",
+        message=f"Recalculated with LibreOffice headless ({stats.summary()}).",
+        stats={"injected": stats.injected, "missing": stats.missing, "skipped_sheets": stats.skipped_sheets},
+    )
 
-    openpyxl never evaluates formulas — it only writes formula strings with the old
-    cached value (or none). This opens the file in LibreOffice Calc, lets it compute
-    every formula, and writes the result back in place. Never raises for expected
-    failure modes (missing LibreOffice, timeout, bad file) — those are reported in
-    the returned RecalcResult so a failed recalculation never masks a successful save.
+
+def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS, mode: str | None = None) -> RecalcResult:
+    """Recalculate every formula in an xlsx file via LibreOffice headless.
+
+    openpyxl never evaluates formulas — it only writes formula strings with an empty
+    cached value. LibreOffice Calc computes every formula on a temporary copy; then
+
+    - ``mode="inject"`` (default) copies only the computed values into the original
+      file, so every part LibreOffice would not round-trip is kept byte-for-byte;
+    - ``mode="roundtrip"`` replaces the file with LibreOffice's export (v0.3.x).
+
+    Never raises for expected failure modes (missing LibreOffice, timeout, bad file) —
+    those are reported in the returned RecalcResult so a failed recalculation never
+    masks a successful save.
     """
+    mode = settings.parse_recalc_mode(mode) if mode else settings.RECALC_MODE
     soffice = find_soffice()
     if not soffice:
         return RecalcResult(
             success=False,
+            mode=mode,
             message=(
                 "LibreOffice (soffice) not found on PATH. The file was saved but formulas "
                 "were not recalculated — cached values may be stale until it is installed. "
@@ -95,7 +142,8 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
             ),
         )
 
-    with tempfile.TemporaryDirectory(prefix="xlsx_tools_mcp_recalc_") as tmpdir:
+    # ignore_cleanup_errors: on Windows soffice.bin can briefly keep the profile dir open.
+    with tempfile.TemporaryDirectory(prefix="xlsx_tools_mcp_recalc_", ignore_cleanup_errors=True) as tmpdir:
         src = Path(path)
         tmp_input = Path(tmpdir) / src.name
         shutil.copy(src, tmp_input)
@@ -125,6 +173,7 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
         except subprocess.TimeoutExpired:
             return RecalcResult(
                 success=False,
+                mode=mode,
                 message=f"LibreOffice timed out after {timeout}s. File was saved but not recalculated.",
             )
 
@@ -132,6 +181,7 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
             stderr = proc.stderr.decode(errors="replace").strip()
             return RecalcResult(
                 success=False,
+                mode=mode,
                 message=f"LibreOffice exited with code {proc.returncode}: {stderr}",
             )
 
@@ -139,8 +189,12 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
         if not tmp_output.is_file():
             return RecalcResult(
                 success=False,
+                mode=mode,
                 message="LibreOffice reported success but produced no output file.",
             )
+
+        if mode == "inject":
+            return _inject_from(src, tmp_output)
 
         errors_found = scan_formula_errors(str(tmp_output))
 
@@ -154,14 +208,18 @@ def recalculate(path: str, timeout: int = SOFFICE_TIMEOUT_SECONDS) -> RecalcResu
             except FileInUseError:
                 return RecalcResult(
                     success=False,
+                    mode=mode,
                     message=f"LibreOffice recalculated formulas, but could not overwrite '{src}' because it is locked by another application.",
                 )
             except PermissionError as exc:
                 return RecalcResult(
                     success=False,
+                    mode=mode,
                     message=f"LibreOffice recalculated formulas, but permission was denied when overwriting '{src}': {exc}",
                 )
         finally:
             staged.unlink(missing_ok=True)
 
-        return RecalcResult(success=True, errors_found=errors_found, message="Recalculated with LibreOffice headless.")
+        return RecalcResult(
+            success=True, errors_found=errors_found, mode=mode, message="Recalculated with LibreOffice headless."
+        )
