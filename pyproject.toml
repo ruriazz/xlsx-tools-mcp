@@ -41,6 +41,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/xlsx_tools_mcp"]
 
+[tool.pytest.ini_options]
+markers = [
+    "soffice: needs a real LibreOffice install (run with `pytest -m soffice`)",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

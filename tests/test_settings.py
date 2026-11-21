@@ -161,3 +161,34 @@ def test_resolve_path_windows_case_insensitive_configured_files(monkeypatch):
     assert resolve_path("BUDGET") == r"C:\Data\Budget.xlsx"
 
 
+
+
+def test_env_bool_and_int_parsing(monkeypatch):
+    from xlsx_tools_mcp import settings as s
+
+    monkeypatch.setenv("X_BOOL", "Yes")
+    assert s._env_bool("X_BOOL", False) is True
+    monkeypatch.setenv("X_BOOL", "off")
+    assert s._env_bool("X_BOOL", True) is False
+    monkeypatch.setenv("X_BOOL", "")
+    assert s._env_bool("X_BOOL", True) is True
+    monkeypatch.setenv("X_BOOL", "maybe")
+    with pytest.raises(ValueError, match="X_BOOL"):
+        s._env_bool("X_BOOL", True)
+    monkeypatch.setenv("X_INT", "12")
+    assert s._env_int("X_INT", 1) == 12
+    monkeypatch.setenv("X_INT", "-1")
+    with pytest.raises(ValueError, match="X_INT"):
+        s._env_int("X_INT", 1, minimum=0)
+    monkeypatch.setenv("X_INT", "abc")
+    with pytest.raises(ValueError, match="X_INT"):
+        s._env_int("X_INT", 1)
+
+
+def test_parse_recalc_mode():
+    from xlsx_tools_mcp import settings as s
+
+    assert s.parse_recalc_mode(" Roundtrip ") == "roundtrip"
+    assert s.parse_recalc_mode("") == "inject"
+    with pytest.raises(ValueError):
+        s.parse_recalc_mode("fast")
