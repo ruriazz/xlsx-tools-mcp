@@ -12,6 +12,7 @@ dependencies = [
     "python-calamine>=0.3.1",
     "defusedxml>=0.7.1",
     "filelock>=3.15.0",
+    "lxml>=5.2",
 ]
 keywords = ["mcp", "excel", "xlsx", "spreadsheet", "model-context-protocol"]
 classifiers = [
