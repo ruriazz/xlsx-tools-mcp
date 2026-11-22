@@ -2,12 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.4.0rc2] — 2026-11-22 (pre-release)
-
-### Changed
-- Tool surface for agents: every tool has a `title` and MCP annotations (read-only, destructive, idempotent, closed world). Parameter descriptions moved from the docstrings into the input schema, fixed choices (`format`, `mode`, `on_violation`, `on_unverifiable`, `remove`, `chart_type`) are enums, and descriptions say which neighboring tool to use instead. The server instructions carry a tool-choice guide and the shared write-response contract. Tool names, parameter names and defaults are unchanged.
-
-## [0.4.0rc1] — 2026-11-22 (pre-release)
+## [0.4.0] — 2026-11-22
 
 ### Added
 - **Value injection recalculation** (`XLSX_MCP_RECALC_MODE=inject`, default): LibreOffice computes formulas on a temporary copy and only the computed values are written into the workbook's formula cells. All other parts (pivot tables, charts, data validation, defined names, `.xlsm` macros) are copied unchanged. `recalculate_workbook` takes a `mode` argument; `roundtrip` keeps the v0.3 behavior.
@@ -20,6 +15,7 @@ All notable changes to this project are documented in this file.
 - `soffice` pytest marker and a CI job running the integration tests against a real LibreOffice.
 
 ### Changed
+- Tool surface for agents: every tool has a `title` and MCP annotations (read-only, destructive, idempotent, closed world). Parameter descriptions moved from the docstrings into the input schema, fixed choices (`format`, `mode`, `on_violation`, `on_unverifiable`, `remove`, `chart_type`) are enums, and descriptions say which neighboring tool to use instead. The server instructions carry a tool-choice guide and the shared write-response contract. Tool names, parameter names and defaults are unchanged.
 - `lxml` is now a dependency (needed to rewrite sheet XML without dropping namespace declarations). openpyxl also uses it when present.
 - Write responses may include `recalc_mode`, `rules`, `rolled_back` and `ripple`; existing keys are unchanged.
 - In inject mode `errors_found` lists only formula cells whose result is an error. Text typed as `#N/A` is no longer reported.
