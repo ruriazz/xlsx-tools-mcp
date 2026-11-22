@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0rc2] — 2026-11-22 (pre-release)
+
+### Changed
+- Tool surface for agents: every tool has a `title` and MCP annotations (read-only, destructive, idempotent, closed world). Parameter descriptions moved from the docstrings into the input schema, fixed choices (`format`, `mode`, `on_violation`, `on_unverifiable`, `remove`, `chart_type`) are enums, and descriptions say which neighboring tool to use instead. The server instructions carry a tool-choice guide and the shared write-response contract. Tool names, parameter names and defaults are unchanged.
+
 ## [0.4.0rc1] — 2026-11-22 (pre-release)
 
 ### Added
