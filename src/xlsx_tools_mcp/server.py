@@ -2,23 +2,27 @@
 
 Read path: python-calamine (fast, accurate types) with an openpyxl fallback for
 formulas/styles/comments. Write path: openpyxl (preserves everything it doesn't
-touch — styles, merges, other formulas) followed by a LibreOffice headless
-recalculation pass, since openpyxl never evaluates formulas itself.
+touch — styles, merges, other formulas) followed by a LibreOffice headless pass
+whose computed formula values are injected back into the file (or, in
+``roundtrip`` mode, whose export replaces it).
 
-Note: the LibreOffice round-trip is a tradeoff, not a guarantee of bit-perfect
-preservation. It recomputes formulas but re-exports the whole workbook, which is
-NOT lossless for every feature openpyxl preserves (pivot tables, charts, data
-validation, some formats/defined names). Callers can pass ``recalculate=False``
-on the value/formula-writing tools to write with openpyxl only and skip it.
+Each tool is a thin wrapper: resolve the path, take the per-file lock, call one
+io-layer function. Parameter meanings live in the input schema (see ``params``),
+tool-choice guidance in the server instructions, and every tool declares MCP
+annotations (read-only / destructive / idempotent) so clients can gate calls.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, TypeVar
+import inspect
+from typing import Annotated, Any, Callable, TypeVar
 
 from mcp.server import MCPServer
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from . import ledger
+from . import params as P
 from . import rules as rules_mod
 from .errors import XlsxMcpError
 from .io import copies, reader, review, sharing, transform, writer
@@ -30,27 +34,55 @@ from .settings import CONFIGURED_FILES, resolve_literal_path, resolve_path
 T = TypeVar("T")
 
 _files_note = (
-    f" Files preloaded at startup (call with no `path`, or with these names, to use them "
-    f"directly — no need to search the filesystem): {', '.join(sorted(CONFIGURED_FILES))}."
+    f"\n\nPreloaded files (pass as `path`, or omit `path` when there is only one): "
+    f"{', '.join(sorted(CONFIGURED_FILES))}."
     if CONFIGURED_FILES
     else ""
 )
 
-mcp = MCPServer(
-    "xlsx-tools-mcp",
-    instructions=(
-        "Tools for reading and writing Excel (.xlsx) workbooks with high accuracy. "
-        "Writes are saved with openpyxl (preserving the file's existing structure, "
-        "styles and formulas) and then recalculated with a LibreOffice headless pass "
-        "so formula results are never stale. Every write response includes "
-        "`errors_found`: any Excel error values (#REF!, #DIV/0!, ...) discovered in "
-        "the recalculated file — check this before treating a write as fully successful. "
-        "When the workbook has rules (see set_rules), write responses also carry `rules`; "
-        "`rolled_back: true` means the write broke a rule and the file was restored. "
-        "`ripple` lists other formula results that changed because of the write."
-        + _files_note
-    ),
-)
+INSTRUCTIONS = """\
+Read and write Excel .xlsx/.xlsm workbooks. Writes keep every part of the file a tool does not touch.
+
+Pick a read tool:
+- New workbook: list_sheets (names, sizes), then profile_sheet (column names, types, min/max).
+- Need rows: read_sheet with cell_range or max_rows. For large sheets use query_sheet (rows matching a filter) or aggregate_sheet (totals per group) instead of reading everything.
+- Find where a value is: search_workbook. One cell's formula, style or comment: get_cell. Hidden sheets, exact size, defined names: get_workbook_info.
+
+Pick a write tool:
+- Set cells at known addresses (values or formulas): write_cells. Add records below the existing data: append_rows.
+- Make or remove space, shifting other cells: insert_rows, delete_rows, insert_columns, delete_columns. Empty cells but keep the layout: clear_range.
+
+Write responses: {saved, recalculated, errors_found, message}, plus recalc_mode, rules, rolled_back and ripple when relevant. \
+Check errors_found (formula cells showing #REF!, #DIV/0!, ...) before reporting success. \
+rolled_back=true means a rule from set_rules failed and the file is unchanged. ripple lists other formula results the write changed. \
+Read tools return formulas' last computed results; writes recompute them with LibreOffice unless recalculate=false.\
+"""
+
+mcp = MCPServer("xlsx-tools-mcp", instructions=INSTRUCTIONS + _files_note)
+
+
+def _tool(title: str, *, read_only: bool = False, destructive: bool = False, idempotent: bool = False):
+    """Register an MCP tool with a title, a dedented description and behavior annotations.
+
+    `destructive` means the call can remove or overwrite existing content (cells,
+    sheets, rules or whole files). All tools work on local files only (closed world).
+    """
+    # Hints equal to the MCP defaults (readOnly=false, destructive=true, idempotent=false)
+    # are left out to keep tools/list small; openWorld defaults to true, so it is always set.
+    hints: dict[str, bool] = {"open_world_hint": False}
+    if read_only:
+        hints.update(read_only_hint=True)
+    elif not destructive:
+        hints.update(destructive_hint=False)
+    if idempotent and not read_only:
+        hints.update(idempotent_hint=True)
+    annotations = ToolAnnotations(**hints)
+
+    def register(fn: Callable[..., T]) -> Callable[..., T]:
+        description = inspect.cleandoc(fn.__doc__ or "")
+        return mcp.tool(title=title, description=description, annotations=annotations)(fn)
+
+    return register
 
 
 def _run(fn: Callable[[], T]) -> T:
@@ -70,494 +102,232 @@ def _run(fn: Callable[[], T]) -> T:
         raise ValueError(f"Permission denied: {exc}") from exc
 
 
+def _backup(backup: bool | None) -> bool:
+    return backup if backup is not None else writer.AUTO_BACKUP
 
-@mcp.tool()
-def restore_backup(backup_path: str, target_path: str) -> dict[str, Any]:
-    """Restore a backup file over a target workbook atomically.
-
-    Args:
-        backup_path: Path to the .bak file to restore from.
-        target_path: Path to the target .xlsx/.xlsm file to overwrite.
-    """
-    backup_path = _run(lambda: resolve_path(backup_path))
-    target_path = _run(lambda: resolve_path(target_path))
-    with file_lock(target_path):
-        return _run(lambda: io_restore_backup(backup_path, target_path))
 
 # ── Inspect / read ────────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@_tool("List preloaded files", read_only=True)
 def list_configured_files() -> dict[str, str]:
-    """List files preloaded at server startup (via the XLSX_MCP_FILES env var).
+    """List workbooks preloaded at startup (XLSX_MCP_FILES) as name -> absolute path.
 
-    Call this first if unsure which files are available — every other tool's `path`
-    argument accepts these names directly (or can be omitted if only one is configured),
-    no filesystem search needed.
+    Call this first when unsure which file to use: any tool's `path` accepts these names.
     """
     return dict(CONFIGURED_FILES)
 
 
-@mcp.tool()
-def list_sheets(path: str | None = None) -> list[dict[str, Any]]:
-    """List every sheet in a workbook with its approximate row/column counts.
+@_tool("List sheets", read_only=True)
+def list_sheets(path: P.Path = None) -> list[dict[str, Any]]:
+    """List every sheet with its approximate row and column count. Fast.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
+    For exact dimensions, hidden state and defined names use get_workbook_info.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: reader.list_sheets(path))
 
 
-@mcp.tool()
-def get_workbook_info(path: str | None = None) -> dict[str, Any]:
-    """Get workbook-level metadata: sheets, exact dimensions, active sheet, defined names.
+@_tool("Get workbook info", read_only=True)
+def get_workbook_info(path: P.Path = None) -> dict[str, Any]:
+    """Get workbook metadata: exact dimensions and visibility of each sheet, active sheet, defined names.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
+    Slower than list_sheets on large files.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: reader.workbook_info(path))
 
 
-@mcp.tool()
+@_tool("Read sheet values", read_only=True)
 def read_sheet(
-    sheet: str,
-    cell_range: str | None = None,
-    max_rows: int | None = None,
-    offset_row: int = 0,
-    format: str = "array",
-    path: str | None = None,
+    sheet: P.Sheet,
+    cell_range: P.OptionalCellRange = None,
+    max_rows: Annotated[int | None, Field(description="Return at most this many rows. Omit for no limit.")] = None,
+    offset_row: Annotated[int, Field(description="Skip this many rows first (after the header row for records/markdown); use with max_rows to page.")] = 0,
+    format: Annotated[P.ReadFormat, Field(description='"array": 2D list. "records": list of objects keyed by the first row. "markdown": table text.')] = "array",
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Read cell values from a sheet.
+    """Return the raw cell values of a sheet or range. Formula cells give their last computed result.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell_range: Optional A1-style range (e.g. "B2:F20"). Omit to read the full used area.
-        max_rows: Optional cap on the number of rows returned, to bound response size for large sheets.
-        offset_row: Skip a number of data rows (0-indexed from first data row).
-        format: "array" (default 2D list), "records" (list of dicts, first row as keys), or "markdown" (table string).
+    Best for small sheets or a known range. On large sheets, filter with query_sheet,
+    summarize with aggregate_sheet, or inspect columns with profile_sheet instead.
+    For a cell's formula text or style use get_cell.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: reader.read_sheet(path, sheet, cell_range, max_rows, offset_row, format))
 
 
-@mcp.tool()
-def get_cell(sheet: str, cell: str, path: str | None = None) -> dict[str, Any]:
-    """Get full detail for a single cell: value, formula, number format, font, fill, merge, comment.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell: Cell reference, e.g. "C5".
-    """
+@_tool("Get cell details", read_only=True)
+def get_cell(
+    sheet: P.Sheet,
+    cell: Annotated[str, Field(description='Cell address, e.g. "C5".')],
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Get everything about one cell: computed value, formula text, number format, font, fill, merge state, comment."""
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: reader.get_cell(path, sheet, cell))
 
 
-@mcp.tool()
+@_tool("Search workbook", read_only=True)
 def search_workbook(
-    query: str, sheet: str | None = None, match_case: bool = False, limit: int | None = None, path: str | None = None
+    query: Annotated[str, Field(description="Text to look for inside cell values (substring match).")],
+    sheet: Annotated[str | None, Field(description="Search only this sheet. Omit to search all sheets.")] = None,
+    match_case: Annotated[bool, Field(description="Match upper/lower case exactly.")] = False,
+    limit: Annotated[int | None, Field(description="Return at most this many matches. Omit for no limit.")] = None,
+    path: P.Path = None,
 ) -> list[dict[str, Any]]:
-    """Search cell values across one or all sheets for a substring match.
+    """Find the cells whose value contains some text. Returns {sheet, cell, value} per match.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        query: Substring to search for.
-        sheet: Restrict the search to one sheet; omit to search every sheet.
-        match_case: Case-sensitive match when True.
-        limit: Optional cap on the number of matches returned, to bound response size for large sheets.
+    Use to locate data when you don't know its address; to filter table rows by
+    conditions use query_sheet.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: reader.search_workbook(path, query, sheet, match_case, limit))
 
 
-@mcp.tool()
-def aggregate_sheet(
-    sheet: str,
-    group_by: list[str],
-    agg: dict[str, str],
-    cell_range: str | None = None,
-    has_header: bool = True,
-    path: str | None = None,
+@_tool("Profile sheet columns", read_only=True)
+def profile_sheet(
+    sheet: P.Sheet,
+    sample_rows: Annotated[int, Field(description="Example values to show per column.")] = 3,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Group and aggregate sheet data with pandas (e.g. sum sales by region).
+    """Summarize each column of a table-shaped sheet (first row = headers): type, empty count, min/max, sample values.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        group_by: Column names to group by (taken from the header row).
-        agg: Mapping of column name to aggregation function, e.g. {"amount": "sum"}.
-        cell_range: Optional A1-style range to read before aggregating.
-        has_header: Whether the first row of the range holds column names.
+    Use first on an unfamiliar sheet to learn its column names before query_sheet or
+    aggregate_sheet. Returns no cell data beyond the samples.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: reader.profile_sheet(path, sheet, sample_rows))
+
+
+@_tool("Query sheet rows", read_only=True)
+def query_sheet(
+    sheet: P.Sheet,
+    filter_query: Annotated[str, Field(description="Condition on header names, e.g. \"Status == 'PAID' and Amount > 500\". Allowed: comparisons, and/or/not, in, arithmetic. Header names must be valid identifiers (no spaces).")],
+    columns: Annotated[list[str] | None, Field(description="Only return these columns. Omit for all.")] = None,
+    max_rows: Annotated[int, Field(description="Return at most this many matching rows.")] = 100,
+    cell_range: P.OptionalCellRange = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Return only the rows of a table-shaped sheet (first row = headers) that match a condition.
+
+    Returns {columns, records, row_count, limited}; row_count counts all matches.
+    Use instead of read_sheet when you need a subset of a large table. For totals
+    per group use aggregate_sheet.
+    """
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: transform.query_sheet(path, sheet, filter_query, columns, max_rows, cell_range))
+
+
+@_tool("Aggregate sheet", read_only=True)
+def aggregate_sheet(
+    sheet: P.Sheet,
+    group_by: Annotated[list[str], Field(description='Header names to group by, e.g. ["Region"].')],
+    agg: Annotated[dict[str, str], Field(description='Header name -> function: sum, mean, min, max, count, median, nunique, first or last. E.g. {"Amount": "sum"}.')],
+    cell_range: P.OptionalCellRange = None,
+    has_header: Annotated[bool, Field(description="First row holds column names. When false, columns are named col_0, col_1, ...")] = True,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Group rows and compute totals per group (e.g. sum of Amount by Region). Returns one record per group.
+
+    Use for summaries of a table; to list individual matching rows use query_sheet.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: transform.aggregate_sheet(path, sheet, group_by, agg, cell_range, has_header))
 
 
-# ── Write ──────────────────────────────────────────────────────────────────────
+# ── Write: workbook and cells ─────────────────────────────────────────────────
 
-@mcp.tool()
-def create_workbook(path: str, sheets: list[str] | None = None, overwrite: bool = False) -> dict[str, Any]:
-    """Create a new .xlsx workbook.
 
-    Args:
-        path: Path for the new file. New files aren't preloaded, so this must be a real path.
-        sheets: Sheet names to create (defaults to a single "Sheet1").
-        overwrite: Replace an existing file at path when True.
-    """
+@_tool("Create workbook", destructive=True)
+def create_workbook(
+    path: Annotated[str, Field(description="File path for the new .xlsx or .xlsm file (preloaded names do not apply).")],
+    sheets: Annotated[list[str] | None, Field(description='Sheet names to create. Default: ["Sheet1"].')] = None,
+    overwrite: Annotated[bool, Field(description="Replace an existing file at path. Refused by default.")] = False,
+) -> dict[str, Any]:
+    """Create a new, empty workbook file."""
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: writer.create_workbook(path, sheets, overwrite))
 
 
-@mcp.tool()
+@_tool("Write cells", destructive=True, idempotent=True)
 def write_cells(
-    sheet: str,
-    cells: list[dict[str, Any]],
-    create_sheet_if_missing: bool = False,
-    recalculate: bool = True,
-    allow_external_formulas: bool = False,
-    backup: bool | None = None,
-    reason: str | None = None,
-    path: str | None = None,
+    sheet: P.Sheet,
+    cells: Annotated[list[dict[str, Any]], Field(description='Cells to set: [{"cell": "A1", "value": 100}, {"cell": "B1", "formula": "=A1*2"}]. Existing content is overwritten.')],
+    create_sheet_if_missing: P.CreateSheetIfMissing = False,
+    recalculate: P.Recalculate = True,
+    allow_external_formulas: P.AllowExternalFormulas = False,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Write values and/or formulas into specific cells, then recalculate the workbook.
+    """Set values or formulas in cells at given addresses, overwriting what is there.
 
-    Set `recalculate=False` to skip the LibreOffice recompute (e.g. for structurally
-    complex workbooks you don't want round-tripped).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cells: List of {"cell": "A1", "value": ...} or {"cell": "B1", "formula": "=A1*2"}.
-        create_sheet_if_missing: Create the sheet first if it doesn't exist yet.
-        recalculate: Run the LibreOffice recompute pass after saving.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-
-    Returns:
-        Write result including `errors_found` — any Excel error values produced by recalculation.
+    To add new records below existing data without computing addresses use
+    append_rows; to make room between rows use insert_rows.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.write_cells(path, sheet, cells, create_sheet_if_missing, recalculate, allow_external_formulas, backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
+        return _run(lambda: writer.write_cells(path, sheet, cells, create_sheet_if_missing, recalculate, allow_external_formulas, _backup(backup), reason=reason))
 
 
-@mcp.tool()
+@_tool("Append rows")
 def append_rows(
-    sheet: str,
-    rows: list[list[Any]],
-    create_sheet_if_missing: bool = False,
-    recalculate: bool = True,
-    allow_external_formulas: bool = False,
-    backup: bool | None = None,
-    reason: str | None = None,
-    path: str | None = None,
+    sheet: P.Sheet,
+    rows: Annotated[list[list[Any]], Field(description='Rows to add, each a list of values from column A, e.g. [["INV-3", 7, "=B5*2"]]. Strings starting with "=" become formulas.')],
+    create_sheet_if_missing: P.CreateSheetIfMissing = False,
+    recalculate: P.Recalculate = True,
+    allow_external_formulas: P.AllowExternalFormulas = False,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Append rows after the last used row of a sheet, then recalculate the workbook.
+    """Add rows below the last used row of a sheet. Never overwrites existing cells.
 
-    Set `recalculate=False` to skip the LibreOffice recompute (e.g. for structurally
-    complex workbooks you don't want round-tripped).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        rows: List of rows, each a list of cell values in column order.
-        create_sheet_if_missing: Create the sheet first if it doesn't exist yet.
-        recalculate: Run the LibreOffice recompute pass after saving.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
+    To change existing cells use write_cells.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.append_rows(path, sheet, rows, create_sheet_if_missing, recalculate, allow_external_formulas, backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
+        return _run(lambda: writer.append_rows(path, sheet, rows, create_sheet_if_missing, recalculate, allow_external_formulas, _backup(backup), reason=reason))
 
 
-@mcp.tool()
-def create_sheet(sheet: str, index: int | None = None, backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Add a new empty sheet to an existing workbook.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Name for the new sheet.
-        index: Zero-based position to insert at; omit to append at the end.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.create_sheet(path, sheet, index, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def delete_sheet(sheet: str, backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Delete a sheet from a workbook. Fails if it is the only sheet left.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name to delete.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.delete_sheet(path, sheet, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def insert_rows(
-    sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, reason: str | None = None, path: str | None = None
-) -> dict[str, Any]:
-    """Insert blank rows, shifting existing rows down.
-
-    Set `recalculate=False` to skip the LibreOffice recompute (e.g. for structurally
-    complex workbooks you don't want round-tripped).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        start_row: 1-based row index to insert before.
-        count: Number of rows to insert.
-        recalculate: Run the LibreOffice recompute pass after saving.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.insert_rows(path, sheet, start_row, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def delete_rows(
-    sheet: str, start_row: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, reason: str | None = None, path: str | None = None
-) -> dict[str, Any]:
-    """Delete rows, shifting the rows below them upward.
-
-    Set `recalculate=False` to skip the LibreOffice recompute (e.g. for structurally
-    complex workbooks you don't want round-tripped).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        start_row: 1-based row index to start deleting from.
-        count: Number of rows to delete.
-        recalculate: Run the LibreOffice recompute pass after saving.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.delete_rows(path, sheet, start_row, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def insert_columns(
-    sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, reason: str | None = None, path: str | None = None
-) -> dict[str, Any]:
-    """Insert blank columns, shifting existing columns right.
-
-    Set `recalculate=False` to skip the LibreOffice recompute (e.g. for structurally
-    complex workbooks you don't want round-tripped).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        start_column: 1-based column index to insert before.
-        count: Number of columns to insert.
-        recalculate: Run the LibreOffice recompute pass after saving.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.insert_columns(path, sheet, start_column, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def delete_columns(
-    sheet: str, start_column: int, count: int = 1, recalculate: bool = True, backup: bool | None = None, reason: str | None = None, path: str | None = None
-) -> dict[str, Any]:
-    """Delete columns, shifting the columns to their right leftward.
-
-    Set `recalculate=False` to skip the LibreOffice recompute (e.g. for structurally
-    complex workbooks you don't want round-tripped).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        start_column: 1-based column index to start deleting from.
-        count: Number of columns to delete.
-        recalculate: Run the LibreOffice recompute pass after saving.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.delete_columns(path, sheet, start_column, count, recalculate, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def merge_cells(sheet: str, cell_range: str, backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Merge a rectangular range of cells into one.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell_range: A1-style range, e.g. "A1:C1".
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.merge_cells(path, sheet, cell_range, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def unmerge_cells(sheet: str, cell_range: str, backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Undo a merge on a range of cells.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell_range: A1-style range that was previously merged.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.unmerge_cells(path, sheet, cell_range, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def set_cell_style(sheet: str, cell_range: str, style: dict[str, Any], backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Apply formatting to a range of cells.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell_range: A1-style range, e.g. "A1:D1".
-        style: Keys among: bold, italic, font_size, font_color (hex RGB, e.g. "FF0000"),
-            bg_color (hex RGB), horizontal, vertical (alignment), border ("thin", "medium",
-            "thick", ...), number_format (e.g. "#,##0.00").
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.set_cell_style(path, sheet, cell_range, style, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def rename_sheet(old_name: str, new_name: str, backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Rename an existing sheet.
-
-    Warning: This tool does NOT automatically update formula references in other sheets.
-    Formulas depending on the old sheet name will break.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        old_name: Current name of the sheet.
-        new_name: New name for the sheet (1-31 chars, valid Excel sheet name).
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.rename_sheet(path, old_name, new_name, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def copy_sheet(source_sheet: str, target_sheet: str, backup: bool | None = None, reason: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Duplicate a sheet including its contents, formulas, and styles.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        source_sheet: Name of the sheet to duplicate.
-        target_sheet: Name of the new sheet (1-31 chars, valid Excel sheet name).
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.copy_sheet(path, source_sheet, target_sheet, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
-def autofit_columns(
-    sheet: str,
-    min_width: int = 10,
-    max_width: int = 50,
-    padding: int = 3,
-    backup: bool | None = None,
-    reason: str | None = None,
-    path: str | None = None,
-) -> dict[str, Any]:
-    """Automatically adjust column widths based on maximum text length.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        min_width: Minimum allowed column width.
-        max_width: Maximum allowed column width.
-        padding: Extra padding characters to add to max length.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
-    path = _run(lambda: resolve_path(path))
-    with file_lock(path):
-        return _run(lambda: writer.autofit_columns(path, sheet, min_width, max_width, padding, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
-
-
-@mcp.tool()
+@_tool("Clear range", destructive=True, idempotent=True)
 def clear_range(
-    sheet: str,
-    cell_range: str,
-    clear_values: bool = True,
-    clear_styles: bool = False,
-    backup: bool | None = None,
-    reason: str | None = None,
-    path: str | None = None,
+    sheet: P.Sheet,
+    cell_range: P.CellRange,
+    clear_values: Annotated[bool, Field(description="Remove values and formulas.")] = True,
+    clear_styles: Annotated[bool, Field(description="Reset formatting to the Normal style.")] = False,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Clear cell values and/or styles within a specified range without deleting rows or columns.
+    """Empty the cells in a range (values and/or formatting). Rows and columns stay in place.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell_range: A1-style range (e.g. "A1:D10") to clear.
-        clear_values: Whether to clear cell values (True by default).
-        clear_styles: Whether to clear cell styles/formats (False by default).
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
+    To remove rows or columns and shift the rest, use delete_rows or delete_columns.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.clear_range(path, sheet, cell_range, clear_values, clear_styles, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
+        return _run(lambda: writer.clear_range(path, sheet, cell_range, clear_values, clear_styles, backup=_backup(backup), reason=reason))
 
 
-@mcp.tool()
-def recalculate_workbook(mode: str | None = None, path: str | None = None) -> dict[str, Any]:
-    """Force a LibreOffice headless recalculation pass and report any formula errors found.
+@_tool("Recalculate workbook", destructive=True, idempotent=True)
+def recalculate_workbook(
+    mode: Annotated[P.RecalcMode | None, Field(description='"inject": write only computed values, keep every other part. "roundtrip": replace the file with LibreOffice\'s export (may drop pivots, charts, validation). Default: XLSX_MCP_RECALC_MODE (inject).')] = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Recompute every formula with LibreOffice and report formula errors.
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        mode: "inject" writes only the computed values into the file and keeps every
-            other part as is; "roundtrip" replaces the file with LibreOffice's export.
-            Defaults to XLSX_MCP_RECALC_MODE (inject).
+    Writes already do this. Needed only after writes with recalculate=false or
+    after the file was edited outside this server.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
@@ -572,119 +342,266 @@ def recalculate_workbook(mode: str | None = None, path: str | None = None) -> di
         }
 
 
-
-@mcp.tool()
-def profile_sheet(
-    sheet: str, sample_rows: int = 3, path: str | None = None
+@_tool("Restore backup", destructive=True, idempotent=True)
+def restore_backup(
+    backup_path: Annotated[str, Field(description="The .bak file to restore from (created by writes with backup enabled).")],
+    target_path: Annotated[str, Field(description="The .xlsx/.xlsm workbook to overwrite.")],
 ) -> dict[str, Any]:
-    """Profile sheet data: metadata, inferred types, null counts, min/max, sample values.
+    """Replace a workbook with one of its .bak backups, atomically."""
+    backup_path = _run(lambda: resolve_path(backup_path))
+    target_path = _run(lambda: resolve_path(target_path))
+    with file_lock(target_path):
+        return _run(lambda: io_restore_backup(backup_path, target_path))
 
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        sample_rows: Number of non-null sample values to return per column.
-    """
+
+# ── Write: sheets ─────────────────────────────────────────────────────────────
+
+
+@_tool("Create sheet")
+def create_sheet(
+    sheet: Annotated[str, Field(description="Name for the new sheet; must not exist yet.")],
+    index: Annotated[int | None, Field(description="Zero-based position. Omit to add at the end.")] = None,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Add a new empty sheet. To duplicate an existing sheet use copy_sheet."""
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: reader.profile_sheet(path, sheet, sample_rows))
+        return _run(lambda: writer.create_sheet(path, sheet, index, backup=_backup(backup), reason=reason))
 
-@mcp.tool()
-def query_sheet(
-    sheet: str, filter_query: str, columns: list[str] | None = None, max_rows: int = 100, cell_range: str | None = None, path: str | None = None
+
+@_tool("Copy sheet")
+def copy_sheet(
+    source_sheet: Annotated[str, Field(description="Sheet to duplicate.")],
+    target_sheet: Annotated[str, Field(description="Name for the copy (1-31 chars, must not exist yet).")],
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Query sheet data using pandas expressions without returning the entire sheet into the LLM context.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        filter_query: Pandas query expression (e.g. "status == 'PAID' and amount > 500").
-        columns: Optional list of columns to return.
-        max_rows: Maximum rows to return (default 100).
-        cell_range: Optional range to restrict reading before querying.
-    """
+    """Duplicate a sheet with its values, formulas and styles, inside the same workbook."""
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: transform.query_sheet(path, sheet, filter_query, columns, max_rows, cell_range))
+        return _run(lambda: writer.copy_sheet(path, source_sheet, target_sheet, backup=_backup(backup), reason=reason))
 
-@mcp.tool()
+
+@_tool("Rename sheet", destructive=True)
+def rename_sheet(
+    old_name: Annotated[str, Field(description="Current sheet name.")],
+    new_name: Annotated[str, Field(description="New sheet name (1-31 chars, none of \\ / ? * : [ ]).")],
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Rename a sheet. Formulas in other sheets that use the old name are NOT updated and will break."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.rename_sheet(path, old_name, new_name, backup=_backup(backup), reason=reason))
+
+
+@_tool("Delete sheet", destructive=True)
+def delete_sheet(
+    sheet: Annotated[str, Field(description="Sheet to delete.")],
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Delete a sheet and everything on it. Refused when it is the only sheet."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.delete_sheet(path, sheet, backup=_backup(backup), reason=reason))
+
+
+# ── Write: rows and columns (cells shift) ─────────────────────────────────────
+
+_StartRow = Annotated[int, Field(description="1-based row number.")]
+_StartColumn = Annotated[int, Field(description="1-based column number (A=1, B=2, ...).")]
+_Count = Annotated[int, Field(description="How many to insert or delete.")]
+
+
+@_tool("Insert rows")
+def insert_rows(
+    sheet: P.Sheet,
+    start_row: _StartRow,
+    count: _Count = 1,
+    recalculate: P.Recalculate = True,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Insert blank rows before start_row; rows below move down."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.insert_rows(path, sheet, start_row, count, recalculate, backup=_backup(backup), reason=reason))
+
+
+@_tool("Delete rows", destructive=True)
+def delete_rows(
+    sheet: P.Sheet,
+    start_row: _StartRow,
+    count: _Count = 1,
+    recalculate: P.Recalculate = True,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Delete rows starting at start_row; rows below move up. To empty cells without shifting use clear_range."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.delete_rows(path, sheet, start_row, count, recalculate, backup=_backup(backup), reason=reason))
+
+
+@_tool("Insert columns")
+def insert_columns(
+    sheet: P.Sheet,
+    start_column: _StartColumn,
+    count: _Count = 1,
+    recalculate: P.Recalculate = True,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Insert blank columns before start_column; columns to the right move right."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.insert_columns(path, sheet, start_column, count, recalculate, backup=_backup(backup), reason=reason))
+
+
+@_tool("Delete columns", destructive=True)
+def delete_columns(
+    sheet: P.Sheet,
+    start_column: _StartColumn,
+    count: _Count = 1,
+    recalculate: P.Recalculate = True,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Delete columns starting at start_column; columns to the right move left. To empty cells without shifting use clear_range."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.delete_columns(path, sheet, start_column, count, recalculate, backup=_backup(backup), reason=reason))
+
+
+# ── Write: formatting and objects ─────────────────────────────────────────────
+
+
+@_tool("Merge cells", destructive=True)
+def merge_cells(
+    sheet: P.Sheet,
+    cell_range: P.CellRange,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Merge a rectangular range into one cell. Only the top-left value is kept."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.merge_cells(path, sheet, cell_range, backup=_backup(backup), reason=reason))
+
+
+@_tool("Unmerge cells")
+def unmerge_cells(
+    sheet: P.Sheet,
+    cell_range: Annotated[str, Field(description='The merged range exactly as merged, e.g. "A1:C1".')],
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Split a merged range back into separate cells."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.unmerge_cells(path, sheet, cell_range, backup=_backup(backup), reason=reason))
+
+
+@_tool("Set cell style", idempotent=True)
+def set_cell_style(
+    sheet: P.Sheet,
+    cell_range: P.CellRange,
+    style: Annotated[dict[str, Any], Field(description='Any of: bold, italic (bool); font_size (number); font_color, bg_color (hex RGB, e.g. "FF0000"); horizontal, vertical (alignment, e.g. "center"); border ("thin", "medium", "thick", ...); number_format (e.g. "#,##0.00").')],
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Apply font, fill, alignment, border or number format to every cell in a range. Values are not changed."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.set_cell_style(path, sheet, cell_range, style, backup=_backup(backup), reason=reason))
+
+
+@_tool("Autofit columns", idempotent=True)
+def autofit_columns(
+    sheet: P.Sheet,
+    min_width: Annotated[int, Field(description="Narrowest width, in characters.")] = 10,
+    max_width: Annotated[int, Field(description="Widest width, in characters.")] = 50,
+    padding: Annotated[int, Field(description="Characters added to the longest value.")] = 3,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
+) -> dict[str, Any]:
+    """Set each column's width to fit its longest value, within min_width..max_width."""
+    path = _run(lambda: resolve_path(path))
+    with file_lock(path):
+        return _run(lambda: writer.autofit_columns(path, sheet, min_width, max_width, padding, backup=_backup(backup), reason=reason))
+
+
+@_tool("Create table")
 def create_table(
-    sheet: str, cell_range: str, table_name: str, style_name: str = "TableStyleMedium9", show_filter: bool = True, show_row_stripes: bool = True, backup: bool | None = None, reason: str | None = None, path: str | None = None
+    sheet: P.Sheet,
+    cell_range: Annotated[str, Field(description='Range including the header row, e.g. "A1:D10". Headers must be non-empty and unique.')],
+    table_name: Annotated[str, Field(description="Workbook-unique name: letters, digits, _ or ., starting with a letter or _.")],
+    style_name: Annotated[str, Field(description='Excel table style, e.g. "TableStyleMedium9".')] = "TableStyleMedium9",
+    show_filter: Annotated[bool, Field(description="Show filter buttons in the header row.")] = True,
+    show_row_stripes: Annotated[bool, Field(description="Shade alternate rows.")] = True,
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Create a formal Excel Table (ListObject) on the specified range.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        cell_range: A1-style range (e.g. "A1:D10").
-        table_name: Unique table identifier across the workbook.
-        style_name: Table style name (e.g. "TableStyleMedium9").
-        show_filter: Whether to display auto-filter dropdown arrows.
-        show_row_stripes: Whether to apply alternating row shading.
-        backup: Whether to create a backup before modifying the workbook.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
+    """Turn a range into a formatted Excel Table (ListObject) with optional filter buttons."""
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.create_table(path, sheet, cell_range, table_name, style_name, show_filter, show_row_stripes, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
+        return _run(lambda: writer.create_table(path, sheet, cell_range, table_name, style_name, show_filter, show_row_stripes, backup=_backup(backup), reason=reason))
 
-@mcp.tool()
+
+@_tool("Create chart")
 def create_chart(
-    sheet: str, chart_type: str, data_range: str, categories_range: str | None = None, title: str = "Chart", target_cell: str = "E2", backup: bool | None = None, reason: str | None = None, path: str | None = None
+    sheet: P.Sheet,
+    chart_type: P.ChartType,
+    data_range: Annotated[str, Field(description='Series values with the series name in the first row, e.g. "B1:B10".')],
+    categories_range: Annotated[str | None, Field(description='Category labels, e.g. "A2:A10".')] = None,
+    title: Annotated[str, Field(description="Chart title.")] = "Chart",
+    target_cell: Annotated[str, Field(description="Cell where the chart's top-left corner is placed.")] = "E2",
+    backup: P.Backup = None,
+    reason: P.Reason = None,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Create a native Excel chart (bar, line, pie, scatter).
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Sheet name.
-        chart_type: One of "bar", "line", "pie", "scatter".
-        data_range: A1-style range holding the chart series values (e.g. "B1:B10").
-        categories_range: Optional A1-style range holding series category labels (e.g. "A2:A10").
-        title: Title string displayed on the chart.
-        target_cell: Cell coordinate where the top-left corner of the chart is placed.
-        backup: Whether to create a backup before modifying the workbook.
-        reason: Optional note recorded in the in-workbook change log (XLSX_MCP_CHANGE_LOG=true).
-    """
+    """Add a native Excel chart built from ranges on the same sheet."""
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
-        return _run(lambda: writer.create_chart(path, sheet, chart_type, data_range, categories_range, title, target_cell, backup=backup if backup is not None else writer.AUTO_BACKUP, reason=reason))
+        return _run(lambda: writer.create_chart(path, sheet, chart_type, data_range, categories_range, title, target_cell, backup=_backup(backup), reason=reason))
 
 
 # ── Rules, review, sharing, change log ───────────────────────────────────────
 
 
-@mcp.tool()
+@_tool("Set rules", destructive=True, idempotent=True)
 def set_rules(
-    rules: list[dict[str, Any]],
-    on_violation: str = "rollback",
-    on_unverifiable: str = "warn",
-    path: str | None = None,
+    rules: Annotated[list[dict[str, Any]], Field(description="Rule objects, each with a unique id and a type (see tool description). An empty list removes all rules.")],
+    on_violation: Annotated[P.OnViolation, Field(description='"rollback": undo a write that breaks a rule. "warn": keep it and report.')] = "rollback",
+    on_unverifiable: Annotated[P.OnUnverifiable, Field(description='What to do when a rule cannot be checked (e.g. LibreOffice missing): "warn" or "rollback".')] = "warn",
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Replace the workbook's rules (an empty list removes them), then evaluate them once.
+    """Replace the workbook's rules and check them once; later value-changing writes are checked automatically.
 
-    After every later value-changing write, rules are checked against the recalculated
-    values. A write that makes a passing rule fail (or a failing rule worse) is rolled
-    back when on_violation="rollback". Rules that already fail and don't get worse
-    never block. Stored next to the workbook as "<file>.rules.json".
-
-    Rule types (each needs a unique "id"):
-      {"type": "cells_equal", "left": "Sheet!B40", "right": "Sheet!C40", "tolerance": 0.01}
-      {"type": "cell_compare", "cell": "Sheet!D4", "op": "<=", "value": 1000}   (or "cell_ref")
+    A write that makes a passing rule fail (or a failing one worse) is rolled back;
+    rules already failing never block. Stored as "<file>.rules.json". Each rule has an
+    "id" plus one of:
+      {"type": "cells_equal", "left": "S!B40", "right": "S!C40", "tolerance": 0.01}
+      {"type": "cell_compare", "cell": "S!D4", "op": "<=", "value": 1000}  (or "cell_ref")
       {"type": "column_check", "sheet": "Data", "expr": "Qty >= 0", "cell_range": "A1:F500"}
       {"type": "column_unique", "sheet": "Data", "column": "Invoice"}
       {"type": "not_empty", "range": "Data!A2:A500"}
       {"type": "no_new_errors"}
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        rules: List of rule objects as above.
-        on_violation: "rollback" (default) or "warn".
-        on_unverifiable: "warn" (default) or "rollback" — what to do when a rule cannot
-            be checked (e.g. LibreOffice missing, sheet deleted).
     """
     path = _run(lambda: resolve_path(path))
 
@@ -706,14 +623,9 @@ def set_rules(
         return _run(apply)
 
 
-@mcp.tool()
-def check_rules(path: str | None = None) -> dict[str, Any]:
-    """Evaluate the workbook's rules against its current values, without writing anything.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-    """
+@_tool("Check rules", read_only=True)
+def check_rules(path: P.Path = None) -> dict[str, Any]:
+    """Check the workbook's rules (from set_rules) against its current values without writing."""
     path = _run(lambda: resolve_path(path))
 
     def check() -> dict[str, Any]:
@@ -730,30 +642,19 @@ def check_rules(path: str | None = None) -> dict[str, Any]:
         return _run(check)
 
 
-@mcp.tool()
+@_tool("Export review copy", destructive=True)
 def export_review_copy(
-    baseline_path: str | None = None,
-    output_path: str | None = None,
-    overwrite: bool = False,
-    highlight_color: str = "FFF2CC",
-    include_recalc_changes: bool = False,
-    max_annotated_cells: int = 2000,
-    path: str | None = None,
+    baseline_path: Annotated[str | None, Field(description="Workbook to compare against. Default: this file's newest .bak backup.")] = None,
+    output_path: Annotated[str | None, Field(description='Where to write the copy. Default: "<name>.review.xlsx" next to the file.')] = None,
+    overwrite: P.Overwrite = False,
+    highlight_color: Annotated[str, Field(description="Hex RGB fill for changed cells.")] = "FFF2CC",
+    include_recalc_changes: Annotated[bool, Field(description="Also mark formulas whose text is the same but whose result changed.")] = False,
+    max_annotated_cells: Annotated[int, Field(description="Highlight at most this many cells; all changes are still listed in _Changes.")] = 2000,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Write a copy of the workbook that highlights every cell changed since a baseline.
+    """Write a copy for a human reviewer: cells changed since a baseline are highlighted with a Before/After comment.
 
-    Changed cells get a fill and a "Before / After" comment; a `_Changes` sheet lists
-    every change with a link to the cell. The workbook itself is never modified.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        baseline_path: Workbook to compare against. Defaults to this file's newest .bak backup.
-        output_path: Where to write the copy. Defaults to "<name>.review.xlsx" next to the file.
-        overwrite: Replace an existing output file.
-        highlight_color: Hex RGB fill for changed cells.
-        include_recalc_changes: Also list formulas whose text is unchanged but whose result changed.
-        max_annotated_cells: Cap on highlighted cells (all changes are still listed in `_Changes`).
+    A `_Changes` sheet lists every change with a link. The workbook itself is not modified.
     """
     path = _run(lambda: resolve_path(path))
     baseline = _run(lambda: resolve_literal_path(baseline_path or review.find_latest_backup(path)))
@@ -768,44 +669,27 @@ def export_review_copy(
         )
 
 
-@mcp.tool()
-def inspect_for_sharing(path: str | None = None) -> dict[str, Any]:
-    """Report hidden or sensitive content to review before a workbook is shared. Read-only.
+@_tool("Inspect for sharing", read_only=True)
+def inspect_for_sharing(path: P.Path = None) -> dict[str, Any]:
+    """Report hidden or sensitive content to review before sharing a workbook.
 
-    Checks hidden/very hidden sheets, hidden rows/columns holding data, comments and
-    their authors, document properties (author, company), external workbook links,
-    defined names pointing elsewhere, pivot cache data, ';;;' or same-color-as-fill
-    text, embedded objects, macros, custom XML and the change log sheet.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
+    Covers hidden sheets, rows and columns, comments, document properties, external
+    links, pivot caches, invisible text, embedded objects, macros, custom XML and the
+    change log. Each finding says whether sanitize_copy can remove it.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
         return _run(lambda: sharing.inspect_for_sharing(path))
 
 
-@mcp.tool()
+@_tool("Sanitize copy", destructive=True)
 def sanitize_copy(
-    output_path: str,
-    remove: list[str] | None = None,
-    overwrite: bool = False,
-    path: str | None = None,
+    output_path: Annotated[str, Field(description="Path for the cleaned copy; must differ from the source.")],
+    remove: Annotated[list[P.Sanitizable] | None, Field(description="What to strip. Default: comments, document_properties, change_log. Hidden sheets are removed only when nothing refers to them; external links become their cached values.")] = None,
+    overwrite: P.Overwrite = False,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Write a cleaned copy of the workbook for sharing. The source file is never modified.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        output_path: Path for the cleaned copy (must differ from the source).
-        remove: Any of "comments", "document_properties", "hidden_sheets",
-            "external_links", "change_log", "macros". Defaults to comments,
-            document_properties and change_log. Hidden sheets are only removed when no
-            formula, name, chart or validation still refers to them. External links are
-            replaced by their last cached values.
-        overwrite: Replace an existing output file.
-    """
+    """Write a cleaned copy of the workbook for sharing (run inspect_for_sharing first). The source is not modified."""
     path = _run(lambda: resolve_path(path))
     output = _run(lambda: resolve_literal_path(output_path))
     copies.ensure_distinct(output, path)
@@ -813,21 +697,16 @@ def sanitize_copy(
         return _run(lambda: sharing.sanitize_copy(path, output, remove, overwrite))
 
 
-@mcp.tool()
+@_tool("Get change log", read_only=True)
 def get_change_log(
-    sheet: str | None = None, cell: str | None = None, limit: int = 50, path: str | None = None
+    sheet: Annotated[str | None, Field(description="Only entries for this sheet.")] = None,
+    cell: Annotated[str | None, Field(description="Only entries for this cell, including ranges that contain it.")] = None,
+    limit: Annotated[int, Field(description="Maximum entries (1-1000).")] = 50,
+    path: P.Path = None,
 ) -> dict[str, Any]:
-    """Read the change log stored inside the workbook, newest first.
+    """Read the change log stored inside the workbook, newest first: time, tool, cell, before/after, reason.
 
-    Entries are written when the server runs with XLSX_MCP_CHANGE_LOG=true. Each has
-    ts_utc, op_id, tool, sheet, ref, before, after and reason.
-
-    Args:
-        path: Path to the .xlsx file, or the name of a preloaded file. Omit if only
-            one file is configured.
-        sheet: Only entries for this sheet.
-        cell: Only entries for this cell, including range entries that contain it.
-        limit: Maximum entries to return (1-1000).
+    Entries exist only for writes made while XLSX_MCP_CHANGE_LOG=true.
     """
     path = _run(lambda: resolve_path(path))
     with file_lock(path):
