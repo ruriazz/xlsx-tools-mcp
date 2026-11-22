@@ -63,7 +63,9 @@ When writing new features or tests:
   - Call `ledger.assert_not_reserved()` on every sheet name the tool targets or creates.
   - Support `backup: bool = False` (or respect `XLSX_MCP_AUTO_BACKUP`) before overwriting existing workbooks.
   - Validate formula inputs against `_validate_formula()` to block unsafe external functions and DDE injections.
-- Add a thin `@mcp.tool()` wrapper in `src/xlsx_tools_mcp/server.py` that resolves the path via `resolve_path()`, takes the lock via `file_lock`, and translates domain errors via `_run()`.
+- Add a thin wrapper in `src/xlsx_tools_mcp/server.py` registered with `@_tool(title, read_only=..., destructive=..., idempotent=...)`. It resolves the path via `resolve_path()`, takes the lock via `file_lock`, and translates domain errors via `_run()`. Set `destructive=True` when the call can remove or overwrite cells, sheets, rules or files.
+- Describe every parameter in the schema: reuse the shared types in `src/xlsx_tools_mcp/params.py` (`P.Path`, `P.Sheet`, `P.Backup`, ...) or use `Annotated[type, Field(description=...)]`, and `Literal[...]` for fixed choices. Keep the docstring to what the tool does and which neighboring tool to use instead; no `Args:` block. `tests/test_tool_surface.py` checks this.
+- If the tool overlaps an existing one, update the tool-choice guide in `INSTRUCTIONS` (`server.py`).
 - Add unit tests in `tests/` exercising the IO function directly.
 - Add integration assertions to `tests/test_e2e_all_tools.py` ensuring the MCP tool entrypoint executes seamlessly.
 - Update the tool table and documentation in `README.md`.

@@ -50,6 +50,7 @@ Live via [pypistats.org](https://pypistats.org/packages/xlsx-tools-mcp), non-mir
 ```
 ┌──────────────────────── Supervisor (MCP transport, stdio)
 │  src/xlsx_tools_mcp/server.py     35 MCP tools + instructions
+│  src/xlsx_tools_mcp/params.py     shared parameter types and descriptions
 │  src/xlsx_tools_mcp/settings.py   env vars, preloaded files, path resolution
 │  src/xlsx_tools_mcp/locking.py    per-file <path>.lock serialization
 │  src/xlsx_tools_mcp/errors.py     domain error types
@@ -272,6 +273,8 @@ With `alias`/`filename` as the alias:
 ## Tool reference
 
 All 35 tools. Unless noted, `path` accepts a filesystem path, a preloaded alias/filename, or may be omitted when exactly one file is preloaded. `create_workbook` is the exception — its `path` is required because a new file is never preloaded.
+
+> **Tool metadata:** every tool has a `title` and MCP annotations: `readOnlyHint` on the 12 read-only tools, `destructiveHint: false` on writes that only add or format, and `openWorldHint: false` everywhere (local files only). Every parameter has a description in the input schema, and fixed choices are enums. The server `instructions` include a short guide for choosing between overlapping tools (`read_sheet` / `query_sheet` / `aggregate_sheet` / `profile_sheet`, `write_cells` / `append_rows`, `clear_range` / `delete_rows`).
 
 > **Response shape (all write tools):** every write tool returns `{"saved": bool, "recalculated": bool, "errors_found": list, "message": str}`. When non-empty, `errors_found` is a list of `{"sheet": "...", "cell": "B2", "error": "#DIV/0!"}`. Extra keys appear when relevant: `recalc_mode` (when LibreOffice was asked to run), `rules` and `rolled_back` (when the workbook has rules), and `ripple` (other formula results changed by a value write). Every write tool also accepts an optional `reason` string, recorded in the change log when it is enabled.
 
