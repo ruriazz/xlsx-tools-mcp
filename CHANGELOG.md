@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] — 2026-11-22
+
+### Added
+- **Value injection recalculation** (`XLSX_MCP_RECALC_MODE=inject`, default): LibreOffice computes formulas on a temporary copy and only the computed values are written into the workbook's formula cells. All other parts (pivot tables, charts, data validation, defined names, `.xlsm` macros) are copied unchanged. `recalculate_workbook` takes a `mode` argument; `roundtrip` keeps the v0.3 behavior.
+- **Rule-guarded writes**: `set_rules` / `check_rules` with six rule types (`cells_equal`, `cell_compare`, `column_check`, `column_unique`, `not_empty`, `no_new_errors`) stored in `<file>.rules.json`. A value write that makes a passing rule fail, or a failing rule worse, is rolled back (`rolled_back: true`); `on_violation="warn"` only reports.
+- **Ripple report**: value-write responses list other formula results changed by the write (`ripple`), controlled by `XLSX_MCP_RIPPLE` and `XLSX_MCP_RIPPLE_MAX_CELLS`.
+- **`export_review_copy`**: copy with changed cells highlighted, Before/After comments and a `_Changes` sheet, compared against the newest `.bak` or a given baseline.
+- **`inspect_for_sharing` / `sanitize_copy`**: report hidden sheets, hidden rows/columns with data, comments, document properties, external links, pivot cache data, invisible text, embedded objects, macros, custom XML and the change log; write a cleaned copy.
+- **In-workbook change log** (opt-in, `XLSX_MCP_CHANGE_LOG=true`): writes are recorded on a very hidden `_xlsx_mcp_log` sheet; all write tools accept `reason`; `get_change_log` reads entries. The sheet name is reserved for all other tools.
+- `XLSX_MCP_MAX_PART_BYTES` caps the XML parts the server parses itself.
+- `soffice` pytest marker and a CI job running the integration tests against a real LibreOffice.
+
+### Changed
+- Tool surface for agents: every tool has a `title` and MCP annotations (read-only, destructive, idempotent, closed world). Parameter descriptions moved from the docstrings into the input schema, fixed choices (`format`, `mode`, `on_violation`, `on_unverifiable`, `remove`, `chart_type`) are enums, and descriptions say which neighboring tool to use instead. The server instructions carry a tool-choice guide and the shared write-response contract. Tool names, parameter names and defaults are unchanged.
+- `lxml` is now a dependency (needed to rewrite sheet XML without dropping namespace declarations). openpyxl also uses it when present.
+- Write responses may include `recalc_mode`, `rules`, `rolled_back` and `ripple`; existing keys are unchanged.
+- In inject mode `errors_found` lists only formula cells whose result is an error. Text typed as `#N/A` is no longer reported.
+- Sheet-removal checks count only visible sheets, so the change-log sheet never keeps the last user sheet alive.
+- Formatting-only tools (`set_cell_style`, `autofit_columns`, `create_table`, `create_chart`, `create_sheet`, `copy_sheet`, `unmerge_cells`) now keep the workbook's cached formula results instead of leaving them empty after the save.
+- `export_review_copy` and `sanitize_copy` resolve `output_path`/`baseline_path` literally (no preloaded-alias lookup) and check them against `XLSX_MCP_ALLOWED_DIRS`.
+- The LibreOffice temporary folder is removed with `ignore_cleanup_errors`, so a lingering Windows handle no longer turns a finished recalculation into an error.
+
+### Fixed
+- `recalculate_workbook` now reports domain errors as clean tool errors (it was not wrapped like the other tools).
+- Formula cached values are no longer left empty after a write when LibreOffice is available in inject mode, so calamine/pandas readers see current results.
+
 ## [0.3.2] — 2026-10-17
 
 ### Fixed

@@ -1,6 +1,6 @@
 [project]
 name = "xlsx-tools-mcp"
-version = "0.3.2"
+version = "0.4.0"
 description = "MCP server for accurate, structure-preserving read/write access to Excel (.xlsx) files"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,6 +12,7 @@ dependencies = [
     "python-calamine>=0.3.1",
     "defusedxml>=0.7.1",
     "filelock>=3.15.0",
+    "lxml>=5.2",
 ]
 keywords = ["mcp", "excel", "xlsx", "spreadsheet", "model-context-protocol"]
 classifiers = [
@@ -39,6 +40,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xlsx_tools_mcp"]
+
+[tool.pytest.ini_options]
+markers = [
+    "soffice: needs a real LibreOffice install (run with `pytest -m soffice`)",
+]
 
 [dependency-groups]
 dev = [

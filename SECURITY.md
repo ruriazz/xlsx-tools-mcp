@@ -44,6 +44,24 @@ controls allow strict containment:
   and swapped atomically via `safe_replace()` with exponential backoff retry for
   transient locks (e.g. Windows Defender scans or file indexers), and clean
   `FileInUseError` signaling if a file is permanently locked by another application.
+- **Hardened direct XML access** — parts read or rewritten by the server itself
+  (value injection, sharing inspection) are parsed with lxml with entity resolution,
+  DTD loading and network access disabled. Parts with a `DOCTYPE` are refused and every
+  part is size-capped (`XLSX_MCP_MAX_PART_BYTES`) on both declared and decompressed size.
+- **Value injection keeps unknown parts intact** — recalculation in `inject` mode only
+  rewrites the `<v>` values of formula cells; every other zip entry is copied unchanged,
+  so features LibreOffice cannot round-trip are not silently dropped.
+- **Derived copies never overwrite inputs** — `export_review_copy` and `sanitize_copy`
+  require an output path different from every input, apply path confinement to it, and
+  take all file locks in a fixed order to avoid deadlocks.
+- **Rules fail closed** — a malformed rules sidecar blocks writes instead of disabling
+  the checks; rollback restores a snapshot taken under the same per-file lock, and the
+  snapshot is kept (and reported) only if the restore itself fails.
+- **Reserved change-log sheet** — `_xlsx_mcp_log` is hidden from listings and blocked
+  for all regular read/write tools. Logged values and reasons are stored as text, so
+  they cannot turn into live formulas.
+- **Pre-share inspection** — `inspect_for_sharing` reports hidden or sensitive content
+  (including the change log); `sanitize_copy` removes selected categories in a new file.
 - **XML-bomb protection** — `defusedxml` is integrated with openpyxl's XML parser
   to prevent entity-expansion (billion-laughs) denial-of-service from hostile spreadsheets.
 - **Concurrency serialization** — per-file locking via `filelock` (sibling `<path>.lock`)

@@ -98,6 +98,25 @@ def _validate_safe_query(filter_query: str) -> None:
             raise ValueError(f"Invalid query: private/dunder names ('{node.id}') are not permitted.")
 
 
+def frame_from_rows(rows: list[list[Any]]) -> pd.DataFrame:
+    """DataFrame from a header row + body, with blank headers named `col_<i>` and
+    duplicate headers suffixed `_1`, `_2`, ... so every column name is unique."""
+    header, *body = rows
+    seen_cols: dict[str, int] = {}
+    df_columns: list[str] = []
+    for i, h in enumerate(header):
+        name = str(h).strip() if (h is not None and str(h).strip() != "") else f"col_{i}"
+        if name in seen_cols:
+            seen_cols[name] += 1
+            df_columns.append(f"{name}_{seen_cols[name]}")
+        else:
+            seen_cols[name] = 0
+            df_columns.append(name)
+    width = len(df_columns)
+    body = [list(r[:width]) + [None] * (width - len(r)) for r in body]
+    return pd.DataFrame(body, columns=df_columns)
+
+
 def query_sheet(
     path: str,
     sheet: str,
@@ -128,19 +147,8 @@ def query_sheet(
     if not rows:
         return {"columns": [], "records": [], "row_count": 0, "limited": False}
 
-    header, *body = rows
-    seen_cols: dict[str, int] = {}
-    df_columns: list[str] = []
-    for i, h in enumerate(header):
-        name = str(h).strip() if (h is not None and str(h).strip() != "") else f"col_{i}"
-        if name in seen_cols:
-            seen_cols[name] += 1
-            df_columns.append(f"{name}_{seen_cols[name]}")
-        else:
-            seen_cols[name] = 0
-            df_columns.append(name)
-    df = pd.DataFrame(body, columns=df_columns)
-    
+    df = frame_from_rows(rows)
+
     try:
         filtered = df.query(filter_query)
     except Exception as e:

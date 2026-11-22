@@ -7,12 +7,12 @@
     "url": "https://github.com/ruriazz/xlsx-tools-mcp",
     "source": "github"
   },
-  "version": "0.3.2",
+  "version": "0.4.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "xlsx-tools-mcp",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "transport": {
         "type": "stdio"
       },
@@ -58,6 +58,55 @@
           "isSecret": false,
           "format": "string",
           "description": "Optional custom directory to store backup files instead of beside the target file"
+        },
+        {
+          "name": "XLSX_MCP_RECALC_MODE",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "How formula results are written back after LibreOffice recalculates: inject (default, keeps the file's structure) or roundtrip"
+        },
+        {
+          "name": "XLSX_MCP_MAX_PART_BYTES",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Largest uncompressed XML part the server will parse, in bytes (default 268435456)"
+        },
+        {
+          "name": "XLSX_MCP_RIPPLE",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Report other formula results changed by a write (default true)"
+        },
+        {
+          "name": "XLSX_MCP_RIPPLE_MAX_CELLS",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Skip the ripple report above this many formula cells (default 200000)"
+        },
+        {
+          "name": "XLSX_MCP_CHANGE_LOG",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Keep a change log inside the workbook on a very hidden sheet (default false)"
+        },
+        {
+          "name": "XLSX_MCP_CHANGE_LOG_MAX_ROWS",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Maximum change-log rows kept per workbook (default 10000)"
+        },
+        {
+          "name": "XLSX_MCP_CHANGE_LOG_MAX_CELLS_PER_OP",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "description": "Maximum per-cell change-log entries per tool call (default 500)"
         }
       ]
     }

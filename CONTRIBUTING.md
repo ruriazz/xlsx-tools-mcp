@@ -23,9 +23,25 @@ All tests must pass before a PR is merged. The test suite (100+ tests) covers:
 - Cross-platform path confinement and multi-delimiter parsing (`test_settings.py`)
 - LibreOffice headless detection, isolated profiles, and recalc (`test_recalc.py`)
 - Safe file locking, retry backoff, and concurrency (`test_locking.py`, `test_writer.py`)
-- Full 29-tool cross-platform end-to-end integration (`test_e2e.py`, `test_e2e_all_tools.py`)
+- Full cross-platform end-to-end integration (`test_e2e.py`, `test_e2e_all_tools.py`, `test_e2e_new_tools.py`)
+- Package/XML access and value injection (`test_ooxml.py`, `test_inject.py`)
+- Rules, rollback and ripple (`test_rules.py`, `test_ripple.py`)
+- Review copies, sharing inspection/sanitizing and the change log (`test_review.py`, `test_sharing.py`, `test_ledger.py`)
 
 `conftest.py` monkeypatches `find_soffice` so tests never require a real LibreOffice installation.
+`tests/helpers.py` provides a fake LibreOffice that evaluates simple formulas, for tests that
+need real recalculated values.
+
+### LibreOffice integration tests
+
+Tests marked `@pytest.mark.soffice` (`tests/test_recalc_soffice.py`) run against a real
+LibreOffice and are skipped when it is not installed:
+
+```bash
+uv run pytest -m soffice -rs
+```
+
+CI runs them in a separate `soffice-integration` job on Ubuntu.
 
 ## Multi-OS CI Matrix
 
@@ -42,10 +58,14 @@ When writing new features or tests:
 
 - Add the core logic in `src/xlsx_tools_mcp/io/` (e.g. `reader.py`, `writer.py`, or `transform.py`) — keep the IO layer **decoupled from MCP**.
 - For write operations:
-  - Route saves through `_finalize()` so writes are atomic and recalculation (`errors_found`) remains consistent.
+  - Route saves through `_finalize()` with a `WriteContext` so writes are atomic, recalculation (`errors_found`) stays consistent, rules/ripple apply, and the change log records the call. Set `changes_values=True` when the tool can change cell values or formulas, `structural=True` when it shifts coordinates, and `ctx.record(...)` each cell written.
+  - Accept an optional `reason: str | None = None` and pass it into the `WriteContext`.
+  - Call `ledger.assert_not_reserved()` on every sheet name the tool targets or creates.
   - Support `backup: bool = False` (or respect `XLSX_MCP_AUTO_BACKUP`) before overwriting existing workbooks.
   - Validate formula inputs against `_validate_formula()` to block unsafe external functions and DDE injections.
-- Add a thin `@mcp.tool()` wrapper in `src/xlsx_tools_mcp/server.py` that resolves the path via `resolve_path()`, takes the lock via `file_lock`, and translates domain errors via `_run()`.
+- Add a thin wrapper in `src/xlsx_tools_mcp/server.py` registered with `@_tool(title, read_only=..., destructive=..., idempotent=...)`. It resolves the path via `resolve_path()`, takes the lock via `file_lock`, and translates domain errors via `_run()`. Set `destructive=True` when the call can remove or overwrite cells, sheets, rules or files.
+- Describe every parameter in the schema: reuse the shared types in `src/xlsx_tools_mcp/params.py` (`P.Path`, `P.Sheet`, `P.Backup`, ...) or use `Annotated[type, Field(description=...)]`, and `Literal[...]` for fixed choices. Keep the docstring to what the tool does and which neighboring tool to use instead; no `Args:` block. `tests/test_tool_surface.py` checks this.
+- If the tool overlaps an existing one, update the tool-choice guide in `INSTRUCTIONS` (`server.py`).
 - Add unit tests in `tests/` exercising the IO function directly.
 - Add integration assertions to `tests/test_e2e_all_tools.py` ensuring the MCP tool entrypoint executes seamlessly.
 - Update the tool table and documentation in `README.md`.

@@ -33,3 +33,19 @@ class WorkbookNotFoundError(XlsxMcpError):
 class InvalidWorkbookError(XlsxMcpError):
     """Raised when a file exists but is not a valid or readable Excel workbook."""
 
+
+class InvalidRulesError(XlsxMcpError):
+    """Raised when a workbook's rule set is malformed or cannot be read."""
+
+
+class ReservedSheetError(XlsxMcpError):
+    """Raised when a tool targets a sheet name reserved for internal use."""
+
+
+class BaselineNotFoundError(XlsxMcpError):
+    """Raised when no baseline workbook is available to compare against."""
+
+
+class InjectionError(XlsxMcpError):
+    """Raised when computed formula values cannot be written into a workbook package."""
+

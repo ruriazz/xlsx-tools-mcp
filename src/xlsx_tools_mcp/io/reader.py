@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.utils.exceptions import InvalidFileException
 from python_calamine import CalamineWorkbook
 
+from .. import ledger
 from ..errors import InvalidWorkbookError, SheetNotFoundError, WorkbookNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ def list_sheets(path: str) -> list[dict[str, Any]]:
         wb = CalamineWorkbook.from_path(path)
         return [
             {"name": name, "rows": sh.height, "columns": sh.width}
-            for name in wb.sheet_names
+            for name in ledger.visible_names(wb.sheet_names)
             for sh in (wb.get_sheet_by_name(name),)
         ]
     except PermissionError:
@@ -56,6 +57,7 @@ def workbook_info(path: str) -> dict[str, Any]:
                 "sheet_state": ws.sheet_state,
             }
             for ws in wb.worksheets
+            if not ledger.is_reserved(ws.title)
         ]
         return {
             "sheets": sheets,
@@ -111,6 +113,7 @@ def read_sheet(
     `offset_row` skips a number of data rows (useful for pagination).
     `format` can be "array" (default 2D list), "records" (list of dicts), or "markdown" (table string).
     """
+    ledger.assert_not_reserved(sheet)
     p = Path(path)
     if not p.is_file():
         raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
@@ -205,6 +208,7 @@ def get_cell(path: str, sheet: str, cell: str) -> dict[str, Any]:
     `data_only=True` load (for the cached computed value) is only done lazily when
     the cell actually holds a formula, since openpyxl can't yield both from one load.
     """
+    ledger.assert_not_reserved(sheet)
     p = Path(path)
     if not p.is_file():
         raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
@@ -283,6 +287,7 @@ def search_workbook(
 
     `limit` optionally caps the number of matches returned; `None` means no limit.
     """
+    ledger.assert_not_reserved(sheet)
     p = Path(path)
     if not p.is_file():
         raise WorkbookNotFoundError(f"Workbook not found: '{path}'.")
@@ -293,7 +298,7 @@ def search_workbook(
     except Exception as exc:
         raise InvalidWorkbookError(f"File '{path}' is not a valid or readable Excel workbook: {exc}") from exc
 
-    target_sheets = [sheet] if sheet else list(wb.sheet_names)
+    target_sheets = [sheet] if sheet else ledger.visible_names(list(wb.sheet_names))
     needle = query if match_case else query.lower()
 
     matches: list[dict[str, Any]] = []
